@@ -138,13 +138,15 @@ This auto-adds `--dangerously-skip-permissions` to Claude Code while the strict 
 
 ## Authentication
 
-The sandbox mounts your host `~/.claude` directory into the container. Authenticate on your host first:
+Each project has its own isolated Claude Code authentication, stored in a Docker named volume (`sandbox-<name>-claude`). Authenticate after building:
 
 ```bash
-claude login
+sandbox login
 ```
 
-The container picks up the session automatically.
+This runs `claude login` inside the container. The session persists in the volume across container restarts and rebuilds. Different projects can use different accounts.
+
+`sandbox clean` removes both the project image and the auth volume. To re-authenticate, run `sandbox login` again after rebuilding.
 
 ## Firewall
 

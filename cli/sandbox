@@ -224,8 +224,9 @@ cmd_run() {
         "--pids-limit" "256"
     )
 
-    # Always mount ~/.claude for auth (read-write for token refresh)
-    docker_args+=("-v" "${HOME}/.claude:/home/node/.claude")
+    # Per-project Claude config volume (isolated auth per sandbox)
+    local claude_volume="sandbox-${name}-claude"
+    docker_args+=("-v" "${claude_volume}:/home/node/.claude")
 
     # Mounts from config
     local has_mounts=false
@@ -399,7 +400,42 @@ cmd_clean() {
     fi
     log "Removing image sandbox-${name}:latest..."
     docker rmi "sandbox-${name}:latest" 2>/dev/null || true
+
+    # Remove the Claude config volume
+    local claude_volume="sandbox-${name}-claude"
+    if docker volume inspect "$claude_volume" &>/dev/null; then
+        docker volume rm "$claude_volume" 2>/dev/null || true
+        log "Removed Claude config volume: ${claude_volume}"
+    fi
+
     log "Cleaned."
+}
+
+cmd_login() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    # Check image exists
+    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    local claude_volume="sandbox-${name}-claude"
+    log "Authenticating Claude Code for sandbox-${name}..."
+    log "Config stored in Docker volume: ${claude_volume}"
+    echo ""
+
+    docker run -it --rm \
+        --hostname sandbox \
+        -v "${claude_volume}:/home/node/.claude" \
+        "sandbox-${name}:latest" \
+        claude login
 }
 
 cmd_logs() {
@@ -538,12 +574,13 @@ Commands:
   build-base          Build the base sandbox image
   build               Build project image from sandbox.yaml
   run [--headless]    Run the sandbox container
+  login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
   shell               Open a shell in the running sandbox
   stop                Stop the running sandbox
   status              Show running sandbox containers
   logs                Show output from the last headless run
-  clean               Remove the project image
+  clean               Remove project image and auth volume
   init                Generate a starter sandbox.yaml
 
 Options:
@@ -557,6 +594,7 @@ case "${1:-help}" in
     build-base)     cmd_build_base ;;
     build)          cmd_build ;;
     run)            cmd_run "$@" ;;
+    login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
     shell)          cmd_shell ;;
     stop)           cmd_stop ;;
