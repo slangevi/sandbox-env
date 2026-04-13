@@ -1,0 +1,98 @@
+#!/bin/bash
+set -euo pipefail
+
+# Resolve the sandbox-env repo root (where this script lives)
+SANDBOX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()   { echo -e "${GREEN}[sandbox]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[sandbox]${NC} $*"; }
+error() { echo -e "${RED}[sandbox]${NC} $*" >&2; }
+
+# Check for required tools
+require_tool() {
+    if ! command -v "$1" &>/dev/null; then
+        error "Required tool '$1' not found. Please install it."
+        exit 1
+    fi
+}
+
+require_tool docker
+require_tool yq
+
+# ── YAML config helpers ──────────────────────────────────────────────
+
+CONFIG_FILE=""
+
+find_config() {
+    if [ -f "${1:-sandbox.yaml}" ]; then
+        CONFIG_FILE="${1:-sandbox.yaml}"
+    elif [ -f "sandbox.yml" ]; then
+        CONFIG_FILE="sandbox.yml"
+    else
+        error "No sandbox.yaml found in current directory."
+        exit 1
+    fi
+}
+
+config_get() {
+    yq -r "$1 // empty" "$CONFIG_FILE"
+}
+
+config_get_default() {
+    local query="$1"
+    local default="$2"
+    local val
+    val=$(yq -r "$query // empty" "$CONFIG_FILE")
+    echo "${val:-$default}"
+}
+
+project_name() {
+    config_get '.name'
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
+
+cmd_build_base() {
+    log "Building base image..."
+    docker build \
+        -f "$SANDBOX_ROOT/base/Dockerfile" \
+        -t sandbox-base:latest \
+        "$SANDBOX_ROOT"
+    log "Base image built: sandbox-base:latest"
+}
+
+cmd_help() {
+    cat <<'USAGE'
+Usage: sandbox <command> [options]
+
+Commands:
+  build-base          Build the base sandbox image
+  build               Build project image from sandbox.yaml
+  run [--headless]    Run the sandbox container
+  shell               Open a shell in the running sandbox
+  stop                Stop the running sandbox
+  clean               Remove the project image
+  init                Generate a starter sandbox.yaml
+
+Options:
+  -h, --help          Show this help message
+USAGE
+}
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    build-base)   cmd_build_base ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        error "Unknown command: $1"
+        cmd_help
+        exit 1
+        ;;
+esac
