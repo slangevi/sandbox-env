@@ -87,6 +87,14 @@ validate_package() {
     fi
 }
 
+validate_model() {
+    local model="$1"
+    if [[ ! "$model" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ ]]; then
+        error "Invalid model name '$model'. Must match: ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$"
+        exit 1
+    fi
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_build_base() {
@@ -278,8 +286,12 @@ cmd_run() {
         [ -z "$key" ] && continue
         # Block dangerous env var overrides
         case "$key" in
-            PATH|LD_PRELOAD|LD_LIBRARY_PATH|SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS)
-                warn "Skipping dangerous env var '$key' — these cannot be set via sandbox.yaml"
+            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
+            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
+            EDITOR|VISUAL|DOCKER_HOST|\
+            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
+            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
+                warn "Skipping dangerous env var '$key'"
                 continue
                 ;;
         esac
@@ -289,14 +301,26 @@ cmd_run() {
     done <<< "$env_keys"
 
     # Git config from sandbox.yaml (passed as SANDBOX_GIT_* env vars)
-    # e.g. git.user.name -> SANDBOX_GIT_USER__NAME
+    # Only allow safe git config keys — some keys allow arbitrary command execution
     local git_keys
     git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
     while IFS= read -r key; do
         [ -z "$key" ] && continue
+        # Whitelist safe git config keys
+        case "$key" in
+            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff)
+                ;;
+            core.fsmonitor|core.sshCommand|core.hooksPath|core.pager|diff.*.textconv|filter.*.clean|filter.*.smudge)
+                warn "Blocked dangerous git config key '$key' — this key allows command execution"
+                continue
+                ;;
+            *)
+                warn "Blocked unknown git config key '$key' — only whitelisted keys are allowed"
+                continue
+                ;;
+        esac
         local val
         val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
-        # Convert key: user.name -> USER__NAME
         local env_key
         env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
         docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
@@ -318,6 +342,10 @@ cmd_run() {
             for i in $(seq 0 $((domain_count - 1))); do
                 local domain
                 domain=$(yq -r ".allowed_domains[$i]" "$CONFIG_FILE")
+                if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+                    error "Invalid domain '$domain'. Must be a valid domain name."
+                    exit 1
+                fi
                 domains="${domains:+${domains},}${domain}"
             done
         fi
@@ -370,9 +398,21 @@ cmd_run() {
 
         local timeout_val
         timeout_val=$(config_get '.claude.timeout')
+        if [ -n "$timeout_val" ] && [[ ! "$timeout_val" =~ ^[0-9]+[smh]?$ ]]; then
+            error "Invalid timeout value '$timeout_val'. Use format like: 30s, 10m, 1h"
+            exit 1
+        fi
         local timeout_cmd=""
         if [ -n "$timeout_val" ]; then
-            timeout_cmd="timeout $timeout_val"
+            # Use gtimeout on macOS (from coreutils), timeout on Linux
+            if command -v timeout &>/dev/null; then
+                timeout_cmd="timeout $timeout_val"
+            elif command -v gtimeout &>/dev/null; then
+                timeout_cmd="gtimeout $timeout_val"
+            else
+                warn "Neither 'timeout' nor 'gtimeout' found. Timeout will not be enforced."
+                warn "On macOS, install coreutils: brew install coreutils"
+            fi
         fi
 
         $timeout_cmd docker run "${docker_args[@]}" \
@@ -587,6 +627,7 @@ cmd_models() {
                 docker volume create "$ollama_volume" >/dev/null
             fi
             for model in "$@"; do
+                validate_model "$model"
                 log "Pulling model: $model"
                 _ollama_run ollama pull "$model"
             done
@@ -608,6 +649,7 @@ cmd_models() {
                 exit 1
             fi
             for model in "$@"; do
+                validate_model "$model"
                 log "Removing model: $model"
                 _ollama_run ollama rm "$model"
             done
