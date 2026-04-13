@@ -16,4 +16,6 @@ npm install -g tsx
 # npm-check-updates
 npm install -g npm-check-updates
 
+npm cache clean --force
+
 echo "=== node-extra feature installed ==="

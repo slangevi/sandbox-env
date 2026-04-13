@@ -260,10 +260,14 @@ cmd_run() {
 
     # Run
     if [ "$mode" = "headless" ]; then
+        if [ ${#passthrough_args[@]} -eq 0 ]; then
+            error "Headless mode requires a prompt. Usage: sandbox run --headless -- \"your prompt here\""
+            exit 1
+        fi
         log "Running sandbox-${name} in headless mode..."
         docker run "${docker_args[@]}" \
             "sandbox-${name}:latest" \
-            claude -p "${passthrough_args[*]:-}"
+            claude -p "${passthrough_args[*]}"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${docker_args[@]}" \

@@ -5,7 +5,8 @@ set -euo pipefail
 echo "=== Installing Ollama feature ==="
 
 # Ensure zstd is available (required by the Ollama installer)
-apt-get update -qq && apt-get install -y --no-install-recommends zstd
+apt-get update -qq && apt-get install -y --no-install-recommends zstd \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama binary
 curl -fsSL https://ollama.com/install.sh | sh

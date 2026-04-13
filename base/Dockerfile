@@ -1,7 +1,7 @@
 FROM node:20-slim
 
 ARG CLAUDE_CODE_VERSION=latest
-ENV DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
 # Core system packages
