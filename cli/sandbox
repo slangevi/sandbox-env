@@ -276,6 +276,79 @@ cmd_run() {
     fi
 }
 
+cmd_shell() {
+    find_config
+    local name
+    name=$(project_name)
+    log "Opening shell in sandbox-${name}..."
+    docker exec -it "sandbox-${name}" /bin/zsh
+}
+
+cmd_stop() {
+    find_config
+    local name
+    name=$(project_name)
+    log "Stopping sandbox-${name}..."
+    docker stop "sandbox-${name}" 2>/dev/null || true
+    log "Stopped."
+}
+
+cmd_clean() {
+    find_config
+    local name
+    name=$(project_name)
+    log "Removing image sandbox-${name}:latest..."
+    docker rmi "sandbox-${name}:latest" 2>/dev/null || true
+    log "Cleaned."
+}
+
+cmd_init() {
+    if [ -f sandbox.yaml ] || [ -f sandbox.yml ]; then
+        error "sandbox.yaml already exists in this directory."
+        exit 1
+    fi
+
+    local name
+    name=$(basename "$(pwd)")
+
+    cat > sandbox.yaml <<YAML
+name: ${name}
+
+features: []
+  # - python
+  # - node-extra
+  # - rust
+  # - go
+  # - aws
+  # - gcloud
+  # - ollama
+  # - llm
+
+packages: []
+  # - ripgrep
+  # - tree
+
+env: {}
+
+mounts:
+  - host: .
+    container: /workspace
+
+firewall: open
+# allowed_domains:
+#   - api.example.com
+
+# setup: ./scripts/custom-setup.sh
+
+claude:
+  mode: interactive
+  args: []
+YAML
+
+    log "Created sandbox.yaml for '${name}'"
+    log "Edit it to add features and packages, then run: sandbox build"
+}
+
 cmd_help() {
     cat <<'USAGE'
 Usage: sandbox <command> [options]
@@ -297,9 +370,13 @@ USAGE
 # ── Main ─────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
-    build-base)   cmd_build_base ;;
-    build)        cmd_build ;;
-    run)          cmd_run "$@" ;;
+    build-base)     cmd_build_base ;;
+    build)          cmd_build ;;
+    run)            cmd_run "$@" ;;
+    shell)          cmd_shell ;;
+    stop)           cmd_stop ;;
+    clean)          cmd_clean ;;
+    init)           cmd_init ;;
     help|-h|--help) cmd_help ;;
     *)
         error "Unknown command: $1"
