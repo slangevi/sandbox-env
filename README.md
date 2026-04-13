@@ -6,7 +6,6 @@ A Docker sandbox for running Claude Code in isolated, per-project customizable c
 
 - [Docker](https://docs.docker.com/get-docker/)
 - [yq](https://github.com/mikefarah/yq) (YAML processor) — `brew install yq`
-- Claude Code authenticated on your host — `claude login`
 
 ## Quick Start
 
@@ -25,7 +24,10 @@ cd ~/my-project
 # 5. Build your project image
 ~/path/to/sandbox-env/cli/sandbox build
 
-# 6. Run it
+# 6. Authenticate Claude Code for this project
+~/path/to/sandbox-env/cli/sandbox login
+
+# 7. Run it
 ~/path/to/sandbox-env/cli/sandbox run
 ```
 
@@ -49,6 +51,10 @@ packages:
 env:
   PROJECT_TYPE: coding
 
+git:
+  user.name: Your Name
+  user.email: you@example.com
+
 mounts:
   - host: .
     container: /workspace
@@ -57,10 +63,20 @@ mounts:
     readonly: true
 
 firewall: open
+# allowed_domains:
+#   - api.example.com
+
+# setup: ./scripts/custom-setup.sh
 
 claude:
   mode: interactive
-  args: []
+  # skip_permissions: false
+  # timeout: 30m
+  # args: []
+
+# resources:
+#   memory: 4g
+#   cpus: 2
 ```
 
 All fields except `name` are optional. Defaults: no features, no extra packages, mount `.` to `/workspace`, firewall open, interactive mode.
@@ -77,6 +93,28 @@ git:
 ```
 
 Any `git config --global` key works. These are applied on every container start, so commits inside the sandbox always have the correct author.
+
+### Custom setup script
+
+For anything the YAML can't express, point to a setup script:
+
+```yaml
+setup: ./scripts/custom-setup.sh
+```
+
+The script runs as root during `sandbox build`, after features and packages are installed. Use it for custom system configuration, additional tool installs, or project-specific setup.
+
+### Resource limits
+
+Constrain container resources:
+
+```yaml
+resources:
+  memory: 4g
+  cpus: 2
+```
+
+These map directly to Docker's `--memory` and `--cpus` flags.
 
 ## Features
 
@@ -109,12 +147,15 @@ Drop a script in `features/`. It must:
 sandbox build-base          Build the base image (once, or to update)
 sandbox build               Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
+sandbox login               Authenticate Claude Code for this project
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
 sandbox stop                Stop the running container
 sandbox status              Show running sandbox containers
 sandbox logs                Show output from the last headless run
-sandbox clean               Remove the project image
+sandbox models <cmd>        Manage Ollama models (pull, list, rm)
+sandbox clean               Remove project image and all project volumes
+sandbox clean-models        Remove shared Ollama models volume
 sandbox init                Generate a starter sandbox.yaml
 ```
 
@@ -160,20 +201,18 @@ sandbox login
 
 This runs `claude login` inside the container. The session persists in the volume across container restarts and rebuilds. Different projects can use different accounts.
 
-`sandbox clean` removes the project image and all per-project volumes. To re-authenticate, run `sandbox login` again after rebuilding.
-
 ## Persistent State
 
 Each project gets isolated Docker volumes for state that should survive container restarts:
 
 | Volume | What persists |
 |---|---|
-| `sandbox-<name>-claude` | Claude Code auth and config |
-| `sandbox-<name>-home` | Shell history, `.gitconfig`, `.config/` |
+| `sandbox-<name>-claude` | Claude Code auth, config, plugins |
+| `sandbox-<name>-home` | Shell history, `.gitconfig`, `.config/`, `~/.local/`, npm global packages (MCP servers) |
 | `sandbox-<name>-cache` | pip, npm, cargo caches (faster installs) |
 | `sandbox-ollama-models` | Ollama models (**shared** across all projects) |
 
-The Ollama models volume is only created for projects with the `ollama` feature. It's shared because models are large (2-40GB) and read-only during inference.
+Globally installed npm packages (including MCP servers installed via `npm install -g`) persist across container restarts via a redirected npm prefix in the home volume.
 
 `sandbox clean` removes per-project volumes. `sandbox clean-models` removes the shared Ollama models volume.
 
@@ -230,24 +269,27 @@ sandbox-env/
 
 ## Ollama
 
-To run local LLMs inside the sandbox:
+Manage models with the `sandbox models` command — no need to configure mounts manually:
+
+```bash
+sandbox models pull llama3.2       # Download a model
+sandbox models pull codellama      # Download another
+sandbox models list                # Show downloaded models
+sandbox models rm tinyllama        # Remove a model
+```
+
+Models are stored in a shared Docker volume (`sandbox-ollama-models`) and available to all projects with the `ollama` feature. Pull once, use everywhere.
+
+To use Ollama in a project:
 
 ```yaml
 features:
   - ollama
-
-mounts:
-  - host: .
-    container: /workspace
-  - host: ~/.ollama/models
-    container: /home/node/.ollama/models
 ```
 
-Ollama starts automatically when the container launches. Mount `~/.ollama/models` from your host to persist downloaded models across container rebuilds.
+Ollama starts automatically when the container launches. Inside the container:
 
 ```bash
-# Inside the container
-ollama pull llama3.2
 ollama run llama3.2 "Explain this code"
 ```
 
