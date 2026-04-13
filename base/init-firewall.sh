@@ -26,11 +26,11 @@ else
     echo "No Docker DNS rules to restore."
 fi
 
-# 4. Allow DNS, SSH, localhost
+# 4. Temporarily allow DNS to any destination (needed for domain resolution during init)
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A INPUT -p udp --sport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT
-iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+
+# 4b. Allow localhost
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
@@ -80,19 +80,37 @@ while read -r domain; do
     done <<< "$ips"
 done < <(collect_domains | sort -u)
 
-# 8. Allow host network (for Docker host communication)
-HOST_IP=$(ip route | grep default | cut -d" " -f3)
+# 8. Allow host gateway (for Docker host communication)
+HOST_IP=$(ip route | grep default | awk '{print $3}')
 if [ -n "$HOST_IP" ]; then
-    HOST_NETWORK=$(echo "$HOST_IP" | sed "s/\.[0-9]*$/.0\/24/")
-    echo "Allowing host network: $HOST_NETWORK"
-    iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
-    iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
+    echo "Allowing host gateway: $HOST_IP"
+    iptables -A INPUT -s "$HOST_IP" -j ACCEPT
+    iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT
 fi
+
+# 8b. Replace broad DNS rule with restricted Docker-resolver-only rule
+iptables -D OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -D INPUT -p udp --sport 53 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d 127.0.0.11 -j ACCEPT
+iptables -A INPUT -p udp --sport 53 -s 127.0.0.11 -j ACCEPT
+
+# 8c. SSH restricted to allowed domains only (applied after ipset is populated)
+iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
+iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
 
 # 9. Set default policies
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
+
+# 9b. Block all IPv6 traffic (firewall only manages IPv4)
+if command -v ip6tables &>/dev/null; then
+    ip6tables -P INPUT DROP
+    ip6tables -P FORWARD DROP
+    ip6tables -P OUTPUT DROP
+    ip6tables -A INPUT -i lo -j ACCEPT
+    ip6tables -A OUTPUT -o lo -j ACCEPT
+fi
 
 # 10. Allow established + ipset destinations
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -109,3 +127,8 @@ if curl --connect-timeout 5 -sf https://example.com >/dev/null 2>&1; then
     exit 1
 fi
 echo "Firewall active. Blocked domains are unreachable."
+
+# Verify an allowed domain is reachable
+if ! curl --connect-timeout 10 -sf https://api.anthropic.com >/dev/null 2>&1; then
+    echo "WARNING: Firewall may be too restrictive — could not reach api.anthropic.com"
+fi
