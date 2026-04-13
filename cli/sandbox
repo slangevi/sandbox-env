@@ -108,6 +108,10 @@ cmd_build_base() {
 
 cmd_build() {
     find_config
+    local no_cache=""
+    if [ "${1:-}" = "--no-cache" ]; then
+        no_cache="--no-cache"
+    fi
     local name
     name=$(project_name)
     if [ -z "$name" ]; then
@@ -115,6 +119,12 @@ cmd_build() {
         exit 1
     fi
     validate_name "$name"
+
+    # Check base image exists
+    if ! docker image inspect sandbox-base:latest &>/dev/null; then
+        error "Base image not found. Run 'sandbox build-base' first."
+        exit 1
+    fi
 
     log "Building project image: sandbox-${name}:latest"
 
@@ -179,7 +189,7 @@ RUN chmod +x /tmp/custom-setup.sh && /tmp/custom-setup.sh && rm /tmp/custom-setu
     done < "$SANDBOX_ROOT/templates/Dockerfile.project.tmpl" > "$dockerfile"
 
     # Build
-    docker build \
+    docker build $no_cache \
         -f "$dockerfile" \
         -t "sandbox-${name}:latest" \
         "$tmpdir"
@@ -594,19 +604,33 @@ cmd_models() {
     local ollama_volume="sandbox-ollama-models"
 
     _ollama_run() {
-        # Start Ollama server in a temporary container, wait for ready, run command
         local container_name="sandbox-ollama-tmp-$$"
+
+        # Ensure cleanup on exit/interrupt
+        trap "docker stop '$container_name' >/dev/null 2>&1 || true" EXIT INT TERM
+
         docker run -d --rm --name "$container_name" \
+            --security-opt no-new-privileges \
+            --pids-limit 256 \
             -v "${ollama_volume}:/root/.ollama" \
             "$ollama_image" serve >/dev/null
 
         # Wait for Ollama to be ready
+        local ready=false
         for i in $(seq 1 15); do
             if docker exec "$container_name" ollama list &>/dev/null; then
+                ready=true
                 break
             fi
             sleep 1
         done
+
+        if ! $ready; then
+            error "Ollama did not become ready in 15 seconds"
+            docker stop "$container_name" >/dev/null 2>&1 || true
+            trap - EXIT INT TERM
+            return 1
+        fi
 
         # Run the command
         docker exec "$container_name" "$@"
@@ -614,6 +638,7 @@ cmd_models() {
 
         # Clean up
         docker stop "$container_name" >/dev/null 2>&1 || true
+        trap - EXIT INT TERM
         return $exit_code
     }
 
@@ -631,6 +656,12 @@ cmd_models() {
                 log "Pulling model: $model"
                 _ollama_run ollama pull "$model"
             done
+            # Fix permissions so node user in sandbox containers can read models
+            log "Fixing model permissions..."
+            docker run --rm \
+                -v "${ollama_volume}:/models" \
+                node:20-slim \
+                chown -R 1000:1000 /models
             ;;
         list)
             if ! docker volume inspect "$ollama_volume" &>/dev/null; then
@@ -738,7 +769,7 @@ Usage: sandbox <command> [options]
 
 Commands:
   build-base          Build the base sandbox image
-  build               Build project image from sandbox.yaml
+  build [--no-cache]   Build project image from sandbox.yaml
   run [--headless]    Run the sandbox container
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
@@ -760,7 +791,7 @@ USAGE
 
 case "${1:-help}" in
     build-base)     cmd_build_base ;;
-    build)          cmd_build ;;
+    build)          shift; cmd_build "$@" ;;
     run)            cmd_run "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
