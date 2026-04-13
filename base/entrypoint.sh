@@ -57,6 +57,20 @@ if [ -d "$PERSISTENT" ]; then
     if [ ! -d /home/node/.config ] || [ -z "$(ls -A /home/node/.config 2>/dev/null)" ]; then
         ln -sfn "$PERSISTENT/config" /home/node/.config
     fi
+
+    # ~/.local for tools that store data/binaries here (pipx, etc.)
+    mkdir -p "$PERSISTENT/local"
+    chown node:node "$PERSISTENT/local"
+    ln -sfn "$PERSISTENT/local" /home/node/.local
+
+    # npm global prefix — persists globally installed packages (MCP servers, etc.)
+    mkdir -p "$PERSISTENT/npm-global"
+    chown node:node "$PERSISTENT/npm-global"
+    # Write env vars to a profile script so all shells pick them up
+    cat > /etc/profile.d/sandbox-persistent.sh <<PROFILE
+export NPM_CONFIG_PREFIX="$PERSISTENT/npm-global"
+export PATH="$PERSISTENT/npm-global/bin:\$PATH"
+PROFILE
 fi
 
 # Ensure cache dir ownership (volume may be fresh)
