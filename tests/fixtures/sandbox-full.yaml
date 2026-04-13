@@ -1,0 +1,22 @@
+name: integration-test
+
+features:
+  - python
+  - llm
+
+packages:
+  - tree
+  - ripgrep
+
+env:
+  TEST_VAR: hello
+
+mounts:
+  - host: .
+    container: /workspace
+
+firewall: open
+
+claude:
+  mode: interactive
+  args: []
