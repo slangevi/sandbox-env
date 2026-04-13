@@ -306,10 +306,15 @@ cmd_run() {
             error "Headless mode requires a prompt. Usage: sandbox run --headless -- \"your prompt here\""
             exit 1
         fi
+        # Capture headless output to log file
+        local log_dir="${HOME}/.sandbox/logs/${name}"
+        mkdir -p "$log_dir"
+        local log_file="${log_dir}/$(date +%Y%m%d-%H%M%S).log"
         log "Running sandbox-${name} in headless mode..."
+        log "Output will be saved to: $log_file"
         docker run "${docker_args[@]}" \
             "sandbox-${name}:latest" \
-            claude -p "${passthrough_args[*]}"
+            claude -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${docker_args[@]}" \
@@ -358,6 +363,76 @@ cmd_clean() {
     log "Removing image sandbox-${name}:latest..."
     docker rmi "sandbox-${name}:latest" 2>/dev/null || true
     log "Cleaned."
+}
+
+cmd_logs() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    local log_dir="${HOME}/.sandbox/logs/${name}"
+    if [ ! -d "$log_dir" ]; then
+        error "No logs found for sandbox-${name}."
+        exit 1
+    fi
+
+    # Find the most recent log file
+    local latest
+    latest=$(ls -t "$log_dir"/*.log 2>/dev/null | head -1)
+    if [ -z "$latest" ]; then
+        error "No log files found in $log_dir"
+        exit 1
+    fi
+
+    log "Showing: $latest"
+    cat "$latest"
+}
+
+cmd_status() {
+    log "Sandbox containers:"
+    echo ""
+    local found=false
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        found=true
+        local container_name status image
+        container_name=$(echo "$line" | awk '{print $1}')
+        image=$(echo "$line" | awk '{print $2}')
+        status=$(echo "$line" | cut -d' ' -f3-)
+        printf "  %-30s %-35s %s\n" "$container_name" "$image" "$status"
+    done < <(docker ps --filter "name=sandbox-" --format "{{.Names}} {{.Image}} {{.Status}}" 2>/dev/null)
+
+    if ! $found; then
+        echo "  No sandbox containers running."
+    fi
+    echo ""
+}
+
+cmd_exec() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if ! docker container inspect "sandbox-${name}" &>/dev/null; then
+        error "No running sandbox found. Run 'sandbox run' first."
+        exit 1
+    fi
+
+    shift # remove 'exec' from args
+    if [ $# -eq 0 ]; then
+        error "Usage: sandbox exec <command> [args...]"
+        exit 1
+    fi
+
+    docker exec -it "sandbox-${name}" "$@"
 }
 
 cmd_init() {
@@ -417,8 +492,11 @@ Commands:
   build-base          Build the base sandbox image
   build               Build project image from sandbox.yaml
   run [--headless]    Run the sandbox container
+  exec <cmd>          Run a command in the running sandbox
   shell               Open a shell in the running sandbox
   stop                Stop the running sandbox
+  status              Show running sandbox containers
+  logs                Show output from the last headless run
   clean               Remove the project image
   init                Generate a starter sandbox.yaml
 
@@ -433,8 +511,11 @@ case "${1:-help}" in
     build-base)     cmd_build_base ;;
     build)          cmd_build ;;
     run)            cmd_run "$@" ;;
+    exec)           cmd_exec "$@" ;;
     shell)          cmd_shell ;;
     stop)           cmd_stop ;;
+    status)         cmd_status ;;
+    logs)           cmd_logs ;;
     clean)          cmd_clean ;;
     init)           cmd_init ;;
     help|-h|--help) cmd_help ;;
