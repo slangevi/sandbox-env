@@ -224,9 +224,20 @@ cmd_run() {
         "--pids-limit" "256"
     )
 
-    # Per-project Claude config volume (isolated auth per sandbox)
-    local claude_volume="sandbox-${name}-claude"
-    docker_args+=("-v" "${claude_volume}:/home/node/.claude")
+    # ── Persistent volumes ──────────────────────────────────────────
+    # Per-project: auth, home dotfiles, package caches
+    docker_args+=("-v" "sandbox-${name}-claude:/home/node/.claude")
+    docker_args+=("-v" "sandbox-${name}-home:/home/node/.persistent")
+    docker_args+=("-v" "sandbox-${name}-cache:/home/node/.cache")
+
+    # Shared: Ollama models (only if ollama feature is in config)
+    local has_ollama=false
+    while IFS= read -r feature; do
+        [ "$feature" = "ollama" ] && has_ollama=true
+    done < <(config_get '.features[]')
+    if $has_ollama; then
+        docker_args+=("-v" "sandbox-ollama-models:/home/node/.ollama")
+    fi
 
     # Mounts from config
     local has_mounts=false
@@ -401,14 +412,26 @@ cmd_clean() {
     log "Removing image sandbox-${name}:latest..."
     docker rmi "sandbox-${name}:latest" 2>/dev/null || true
 
-    # Remove the Claude config volume
-    local claude_volume="sandbox-${name}-claude"
-    if docker volume inspect "$claude_volume" &>/dev/null; then
-        docker volume rm "$claude_volume" 2>/dev/null || true
-        log "Removed Claude config volume: ${claude_volume}"
-    fi
+    # Remove per-project volumes
+    for suffix in claude home cache; do
+        local vol="sandbox-${name}-${suffix}"
+        if docker volume inspect "$vol" &>/dev/null; then
+            docker volume rm "$vol" 2>/dev/null || true
+            log "Removed volume: ${vol}"
+        fi
+    done
 
     log "Cleaned."
+}
+
+cmd_clean_models() {
+    local vol="sandbox-ollama-models"
+    if docker volume inspect "$vol" &>/dev/null; then
+        docker volume rm "$vol" 2>/dev/null || true
+        log "Removed shared Ollama models volume: ${vol}"
+    else
+        log "No Ollama models volume found."
+    fi
 }
 
 cmd_login() {
@@ -580,7 +603,8 @@ Commands:
   stop                Stop the running sandbox
   status              Show running sandbox containers
   logs                Show output from the last headless run
-  clean               Remove project image and auth volume
+  clean               Remove project image and all project volumes
+  clean-models        Remove shared Ollama models volume
   init                Generate a starter sandbox.yaml
 
 Options:
@@ -601,6 +625,7 @@ case "${1:-help}" in
     status)         cmd_status ;;
     logs)           cmd_logs ;;
     clean)          cmd_clean ;;
+    clean-models)   cmd_clean_models ;;
     init)           cmd_init ;;
     help|-h|--help) cmd_help ;;
     *)

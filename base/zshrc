@@ -1,5 +1,6 @@
 # sandbox zsh config
-export HISTFILE=/commandhistory/.zsh_history
+# History persists via the .persistent volume (symlinked by entrypoint)
+export HISTFILE="$HOME/.zsh_history"
 export HISTSIZE=10000
 export SAVEHIST=10000
 setopt SHARE_HISTORY

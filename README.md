@@ -146,7 +146,22 @@ sandbox login
 
 This runs `claude login` inside the container. The session persists in the volume across container restarts and rebuilds. Different projects can use different accounts.
 
-`sandbox clean` removes both the project image and the auth volume. To re-authenticate, run `sandbox login` again after rebuilding.
+`sandbox clean` removes the project image and all per-project volumes. To re-authenticate, run `sandbox login` again after rebuilding.
+
+## Persistent State
+
+Each project gets isolated Docker volumes for state that should survive container restarts:
+
+| Volume | What persists |
+|---|---|
+| `sandbox-<name>-claude` | Claude Code auth and config |
+| `sandbox-<name>-home` | Shell history, `.gitconfig`, `.config/` |
+| `sandbox-<name>-cache` | pip, npm, cargo caches (faster installs) |
+| `sandbox-ollama-models` | Ollama models (**shared** across all projects) |
+
+The Ollama models volume is only created for projects with the `ollama` feature. It's shared because models are large (2-40GB) and read-only during inference.
+
+`sandbox clean` removes per-project volumes. `sandbox clean-models` removes the shared Ollama models volume.
 
 ## Firewall
 
