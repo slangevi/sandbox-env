@@ -19,6 +19,9 @@ if [ -f /etc/sandbox/services/ollama ]; then
         fi
         sleep 1
     done
+    if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
+        echo "WARNING: Ollama did not become ready within 10 seconds. Check /tmp/ollama.log"
+    fi
 fi
 
 # Execute the provided command (zsh for interactive, claude for headless)

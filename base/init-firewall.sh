@@ -1,2 +1,3 @@
 #!/bin/bash
-echo "Firewall not configured"
+echo "ERROR: Firewall not yet configured. Install firewall scripts first."
+exit 1

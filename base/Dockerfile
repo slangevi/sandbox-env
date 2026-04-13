@@ -1,8 +1,8 @@
 FROM node:20-slim
 
 ARG CLAUDE_CODE_VERSION=latest
-ARG DEBIAN_FRONTEND=noninteractive
-ARG TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
 
 # Core system packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
