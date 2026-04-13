@@ -150,6 +150,132 @@ RUN chmod +x /tmp/custom-setup.sh && /tmp/custom-setup.sh && rm /tmp/custom-setu
     log "Project image built: sandbox-${name}:latest"
 }
 
+cmd_run() {
+    find_config
+    local name
+    name=$(project_name)
+
+    # Check image exists
+    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    # Parse --headless flag
+    local mode
+    mode=$(config_get_default '.claude.mode' 'interactive')
+    local passthrough_args=()
+    local parsing_passthrough=false
+
+    shift # remove 'run' from args
+    while [ $# -gt 0 ]; do
+        if [ "$1" = "--" ]; then
+            parsing_passthrough=true
+            shift
+            continue
+        fi
+        if $parsing_passthrough; then
+            passthrough_args+=("$1")
+        elif [ "$1" = "--headless" ]; then
+            mode="headless"
+        fi
+        shift
+    done
+
+    # Build docker run args
+    local docker_args=(
+        "--name" "sandbox-${name}"
+        "--rm"
+        "--hostname" "sandbox"
+    )
+
+    # Always mount ~/.claude for auth (read-write for token refresh)
+    docker_args+=("-v" "${HOME}/.claude:/home/node/.claude")
+
+    # Mounts from config
+    local has_mounts=false
+    local mount_count
+    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
+        for i in $(seq 0 $((mount_count - 1))); do
+            has_mounts=true
+            local host_path container_path readonly_flag
+            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
+            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
+            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
+
+            # Expand ~ in host path
+            host_path="${host_path/#\~/$HOME}"
+            # Resolve relative paths (relative to config file location)
+            if [[ "$host_path" == .* ]]; then
+                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
+            fi
+
+            local mount_spec="${host_path}:${container_path}"
+            if [ "$readonly_flag" = "true" ]; then
+                mount_spec="${mount_spec}:ro"
+            fi
+            docker_args+=("-v" "$mount_spec")
+        done
+    fi
+
+    # Default mount if none specified
+    if ! $has_mounts; then
+        docker_args+=("-v" "$(pwd):/workspace")
+    fi
+
+    # Environment variables from config
+    local env_keys
+    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        local val
+        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
+        docker_args+=("-e" "${key}=${val}")
+    done <<< "$env_keys"
+
+    # Firewall mode
+    local firewall
+    firewall=$(config_get_default '.firewall' 'open')
+    docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
+
+    if [ "$firewall" = "strict" ]; then
+        docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
+
+        # Pass allowed_domains as comma-separated env var
+        local domains=""
+        local domain_count
+        domain_count=$(yq '.allowed_domains | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        if [ "$domain_count" != "null" ] && [ "$domain_count" -gt 0 ] 2>/dev/null; then
+            for i in $(seq 0 $((domain_count - 1))); do
+                local domain
+                domain=$(yq -r ".allowed_domains[$i]" "$CONFIG_FILE")
+                domains="${domains:+${domains},}${domain}"
+            done
+        fi
+        if [ -n "$domains" ]; then
+            docker_args+=("-e" "SANDBOX_ALLOWED_DOMAINS=${domains}")
+        fi
+    fi
+
+    # Run
+    if [ "$mode" = "headless" ]; then
+        log "Running sandbox-${name} in headless mode..."
+        docker run "${docker_args[@]}" \
+            "sandbox-${name}:latest" \
+            claude -p "${passthrough_args[*]:-}"
+    elif [ ${#passthrough_args[@]} -gt 0 ]; then
+        log "Running sandbox-${name} with command..."
+        docker run "${docker_args[@]}" \
+            "sandbox-${name}:latest" \
+            "${passthrough_args[@]}"
+    else
+        log "Running sandbox-${name} interactively..."
+        docker run -it "${docker_args[@]}" \
+            "sandbox-${name}:latest"
+    fi
+}
+
 cmd_help() {
     cat <<'USAGE'
 Usage: sandbox <command> [options]
@@ -173,6 +299,7 @@ USAGE
 case "${1:-help}" in
     build-base)   cmd_build_base ;;
     build)        cmd_build ;;
+    run)          cmd_run "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
         error "Unknown command: $1"
