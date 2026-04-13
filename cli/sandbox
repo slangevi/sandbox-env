@@ -61,6 +61,32 @@ project_name() {
     config_get '.name'
 }
 
+# ── Input validation ────────────────────────────────────────────────
+
+validate_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+        error "Invalid project name '$name'. Must match: ^[a-z0-9][a-z0-9._-]*$"
+        exit 1
+    fi
+}
+
+validate_feature() {
+    local feature="$1"
+    if [[ ! "$feature" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        error "Invalid feature name '$feature'. Must match: ^[a-z0-9][a-z0-9-]*$"
+        exit 1
+    fi
+}
+
+validate_package() {
+    local pkg="$1"
+    if [[ ! "$pkg" =~ ^[a-z0-9][a-z0-9.+_-]*$ ]]; then
+        error "Invalid package name '$pkg'. Must match: ^[a-z0-9][a-z0-9.+_-]*$"
+        exit 1
+    fi
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_build_base() {
@@ -80,6 +106,7 @@ cmd_build() {
         error "sandbox.yaml must have a 'name' field."
         exit 1
     fi
+    validate_name "$name"
 
     log "Building project image: sandbox-${name}:latest"
 
@@ -96,6 +123,7 @@ cmd_build() {
     # Features
     while IFS= read -r feature; do
         [ -z "$feature" ] && continue
+        validate_feature "$feature"
         local script="$SANDBOX_ROOT/features/${feature}.sh"
         if [ ! -f "$script" ]; then
             error "Feature script not found: $script"
@@ -111,6 +139,7 @@ RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm /tmp/${feature}.sh
     local packages=""
     while IFS= read -r pkg; do
         [ -z "$pkg" ] && continue
+        validate_package "$pkg"
         packages="${packages} ${pkg}"
     done < <(config_get '.packages[]')
     if [ -n "$packages" ]; then
@@ -154,6 +183,10 @@ cmd_run() {
     find_config
     local name
     name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
 
     # Check image exists
     if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
@@ -187,6 +220,8 @@ cmd_run() {
         "--name" "sandbox-${name}"
         "--rm"
         "--hostname" "sandbox"
+        "--security-opt" "no-new-privileges"
+        "--pids-limit" "256"
     )
 
     # Always mount ~/.claude for auth (read-write for token refresh)
@@ -229,6 +264,13 @@ cmd_run() {
     env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
     while IFS= read -r key; do
         [ -z "$key" ] && continue
+        # Block dangerous env var overrides
+        case "$key" in
+            PATH|LD_PRELOAD|LD_LIBRARY_PATH|SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS)
+                warn "Skipping dangerous env var '$key' — these cannot be set via sandbox.yaml"
+                continue
+                ;;
+        esac
         local val
         val=$(yq -r ".env.${key}" "$CONFIG_FILE")
         docker_args+=("-e" "${key}=${val}")
@@ -284,6 +326,10 @@ cmd_shell() {
     find_config
     local name
     name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
     log "Opening shell in sandbox-${name}..."
     docker exec -it "sandbox-${name}" /bin/zsh
 }
@@ -292,6 +338,10 @@ cmd_stop() {
     find_config
     local name
     name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
     log "Stopping sandbox-${name}..."
     docker stop "sandbox-${name}" 2>/dev/null || true
     log "Stopped."
@@ -301,6 +351,10 @@ cmd_clean() {
     find_config
     local name
     name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
     log "Removing image sandbox-${name}:latest..."
     docker rmi "sandbox-${name}:latest" 2>/dev/null || true
     log "Cleaned."
@@ -314,6 +368,8 @@ cmd_init() {
 
     local name
     name=$(basename "$(pwd)")
+    # Sanitize to lowercase alphanumeric with hyphens
+    name=$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | sed 's/^[^a-z0-9]/x/')
 
     cat > sandbox.yaml <<YAML
 name: ${name}
