@@ -69,5 +69,16 @@ if [ -d /home/node/.ollama ]; then
     chown node:node /home/node/.ollama
 fi
 
+# Apply git config from SANDBOX_GIT_* env vars (set by CLI from sandbox.yaml)
+# Format: SANDBOX_GIT_<KEY>=<VALUE> where KEY uses __ for dots
+# e.g. SANDBOX_GIT_USER__NAME="Your Name" -> git config --global user.name "Your Name"
+while IFS='=' read -r var val; do
+    [ -z "$var" ] && continue
+    # Strip SANDBOX_GIT_ prefix, lowercase, replace __ with .
+    local_key="${var#SANDBOX_GIT_}"
+    local_key=$(echo "$local_key" | tr '[:upper:]' '[:lower:]' | sed 's/__/./g')
+    gosu node git config --global "$local_key" "$val"
+done < <(env | grep '^SANDBOX_GIT_' | sort)
+
 # Drop privileges and execute the user's command as the node user
 exec gosu node "$@"

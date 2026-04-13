@@ -65,6 +65,19 @@ claude:
 
 All fields except `name` are optional. Defaults: no features, no extra packages, mount `.` to `/workspace`, firewall open, interactive mode.
 
+### Git configuration
+
+Set git identity per project in `sandbox.yaml`:
+
+```yaml
+git:
+  user.name: Your Name
+  user.email: you@example.com
+  init.defaultBranch: main
+```
+
+Any `git config --global` key works. These are applied on every container start, so commits inside the sandbox always have the correct author.
+
 ## Features
 
 Composable install scripts in `features/`. Add them to your `sandbox.yaml` to include in your project image.

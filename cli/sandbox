@@ -288,6 +288,20 @@ cmd_run() {
         docker_args+=("-e" "${key}=${val}")
     done <<< "$env_keys"
 
+    # Git config from sandbox.yaml (passed as SANDBOX_GIT_* env vars)
+    # e.g. git.user.name -> SANDBOX_GIT_USER__NAME
+    local git_keys
+    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        local val
+        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
+        # Convert key: user.name -> USER__NAME
+        local env_key
+        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
+        docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
+    done <<< "$git_keys"
+
     # Firewall mode
     local firewall
     firewall=$(config_get_default '.firewall' 'open')
@@ -560,6 +574,10 @@ packages: []
   # - tree
 
 env: {}
+
+# git:
+#   user.name: Your Name
+#   user.email: you@example.com
 
 mounts:
   - host: .
