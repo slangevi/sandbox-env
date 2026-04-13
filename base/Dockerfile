@@ -11,7 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     less \
-    sudo \
     fzf \
     zsh \
     man-db \
@@ -49,12 +48,16 @@ RUN ARCH=$(dpkg --print-architecture) && \
     mv /tmp/delta-*/delta /usr/local/bin/ && \
     rm -rf /tmp/delta-*
 
+# gosu for privilege dropping in entrypoint
+RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/1.17/gosu-$(dpkg --print-architecture)" -o /usr/local/bin/gosu \
+    && chmod +x /usr/local/bin/gosu \
+    && gosu nobody true
+
 # Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
-# Configure non-root user (node user already exists in node image)
-RUN echo "node ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/node \
-    && chmod 0440 /etc/sudoers.d/node
+# No broad sudo — entrypoint runs as root for firewall/services,
+# then drops to node user. Sudo removed entirely for security.
 
 # Create directories
 RUN mkdir -p /workspace /etc/sandbox/firewall.d /commandhistory \
@@ -77,7 +80,8 @@ ENV DEVCONTAINER=true \
     EDITOR=nano \
     VISUAL=nano
 
-USER node
+# Entrypoint runs as root to init firewall/services, then drops to node
+# USER node  -- removed, entrypoint handles privilege drop
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
