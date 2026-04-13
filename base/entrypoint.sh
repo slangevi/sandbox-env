@@ -53,10 +53,13 @@ if [ -d "$PERSISTENT" ]; then
     # General config directory (for tools that use ~/.config)
     mkdir -p "$PERSISTENT/config"
     chown node:node "$PERSISTENT/config"
-    # Only link if ~/.config doesn't already have content from features
-    if [ ! -d /home/node/.config ] || [ -z "$(ls -A /home/node/.config 2>/dev/null)" ]; then
-        ln -sfn "$PERSISTENT/config" /home/node/.config
+    # Merge: copy feature-installed config into persistent volume (without overwriting existing)
+    if [ -d /home/node/.config ] && [ -n "$(ls -A /home/node/.config 2>/dev/null)" ]; then
+        cp -rn /home/node/.config/. "$PERSISTENT/config/" 2>/dev/null || true
     fi
+    # Remove the original and symlink to persistent volume
+    rm -rf /home/node/.config
+    ln -sfn "$PERSISTENT/config" /home/node/.config
 
     # ~/.local for tools that store data/binaries here (pipx, etc.)
     mkdir -p "$PERSISTENT/local"

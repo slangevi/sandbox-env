@@ -26,9 +26,9 @@ echo "=== CLI Tests ==="
 check "help command works" "$SANDBOX" help
 
 # init
-TMPDIR=$(mktemp -d)
-check "init creates sandbox.yaml" bash -c "cd $TMPDIR && $SANDBOX init && test -f sandbox.yaml"
-rm -rf "$TMPDIR"
+TEST_TMPDIR=$(mktemp -d)
+check "init creates sandbox.yaml" bash -c "cd $TEST_TMPDIR && $SANDBOX init && test -f sandbox.yaml"
+rm -rf "$TEST_TMPDIR"
 
 # build (using fixture)
 check "build creates project image" bash -c "cd $FIXTURES && $SANDBOX build"

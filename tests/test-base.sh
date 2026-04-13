@@ -38,7 +38,7 @@ check "runs as node user" bash -c '[ "$(whoami)" = "node" ]'
 # Check workspace exists
 check "/workspace exists" bash -c '[ -d /workspace ]'
 # Check sudo works
-check "sudo works" sudo echo "ok"
+check "sudo not available (security)" bash -c '! command -v sudo'
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -3,6 +3,9 @@ FROM sandbox-base:latest
 
 USER root
 
+# Ensure directories exist for feature scripts
+RUN mkdir -p /etc/sandbox/firewall.d /etc/sandbox/services
+
 # Feature scripts
 %%FEATURES%%
 
@@ -11,9 +14,6 @@ USER root
 
 # Custom setup script
 %%SETUP%%
-
-# Create firewall.d directory marker for features
-RUN mkdir -p /etc/sandbox/firewall.d /etc/sandbox/services
 
 # Entrypoint runs as root, then drops to node via gosu
 WORKDIR /workspace
