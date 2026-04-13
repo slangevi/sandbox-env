@@ -293,6 +293,40 @@ Ollama starts automatically when the container launches. Inside the container:
 ollama run llama3.2 "Explain this code"
 ```
 
+## LLM CLI
+
+The `llm` feature installs [Simon Willison's llm](https://llm.datasette.io/) with Claude and Ollama plugins pre-configured.
+
+```yaml
+features:
+  - python    # required
+  - llm
+  - ollama    # optional, for local models
+```
+
+Run prompts from outside the container:
+
+```bash
+# One-off prompt
+sandbox run -- llm "Summarize this code"
+
+# With a specific model
+sandbox run -- llm -m claude-3.5-sonnet "Explain this error"
+
+# Using local Ollama models
+sandbox run -- llm -m ollama/llama3.2 "What does this function do?"
+
+# Pipe input
+sandbox run -- bash -c 'cat /workspace/main.py | llm "Review this code"'
+```
+
+Or in a running container:
+
+```bash
+sandbox exec llm "Your prompt"
+sandbox exec llm -m ollama/llama3.2 "Your prompt"
+```
+
 ## Testing
 
 ```bash
