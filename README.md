@@ -95,8 +95,11 @@ Drop a script in `features/`. It must:
 sandbox build-base          Build the base image (once, or to update)
 sandbox build               Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
-sandbox shell               Open another shell in a running container
+sandbox exec <cmd>          Run a command in a running container
+sandbox shell               Open a shell in a running container
 sandbox stop                Stop the running container
+sandbox status              Show running sandbox containers
+sandbox logs                Show output from the last headless run
 sandbox clean               Remove the project image
 sandbox init                Generate a starter sandbox.yaml
 ```
@@ -108,6 +111,30 @@ Run Claude Code non-interactively:
 ```bash
 sandbox run --headless -- "Refactor the auth module to use JWT"
 ```
+
+Output is automatically saved to `~/.sandbox/logs/<name>/`. View it with:
+
+```bash
+sandbox logs
+```
+
+### Autonomous mode
+
+For fully unattended operation with `--dangerously-skip-permissions`, use strict firewall + skip_permissions together:
+
+```yaml
+firewall: strict
+claude:
+  mode: headless
+  skip_permissions: true
+  timeout: 30m
+
+resources:
+  memory: 4g
+  cpus: 2
+```
+
+This auto-adds `--dangerously-skip-permissions` to Claude Code while the strict firewall constrains network access. The sandbox warns if you enable skip_permissions without a strict firewall.
 
 ## Authentication
 
@@ -137,7 +164,18 @@ allowed_domains:
   - internal.mycompany.com
 ```
 
-Strict mode is recommended when running with `claude --dangerously-skip-permissions`.
+Strict mode is recommended when running with `--dangerously-skip-permissions`.
+
+### Security hardening
+
+In strict mode, the firewall:
+- Blocks all IPv6 traffic
+- Restricts DNS to the Docker resolver only (prevents DNS tunneling)
+- Restricts SSH to whitelisted destinations only
+- Narrows host network access to the gateway IP only
+- Verifies both blocking and allowing work at startup
+
+The container runs as root only during startup (for firewall init), then drops to the `node` user permanently via `gosu`. There is no sudo available inside the container.
 
 ## Architecture
 
@@ -193,6 +231,12 @@ tests/test-feature.sh python "python --version" "pip --version"
 
 # Test CLI commands
 tests/test-cli.sh
+
+# Test CLI error handling and input validation
+tests/test-cli-errors.sh
+
+# Test run modes, exec, readonly mounts
+tests/test-run-modes.sh
 
 # Test firewall (requires NET_ADMIN capability)
 tests/test-firewall.sh
