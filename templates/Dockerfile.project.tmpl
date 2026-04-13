@@ -15,5 +15,5 @@ USER root
 # Create firewall.d directory marker for features
 RUN mkdir -p /etc/sandbox/firewall.d /etc/sandbox/services
 
-USER node
+# Entrypoint runs as root, then drops to node via gosu
 WORKDIR /workspace
