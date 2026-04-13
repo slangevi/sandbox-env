@@ -90,6 +90,7 @@ Composable install scripts in `features/`. Add them to your `sandbox.yaml` to in
 | `go` | Go 1.22, golangci-lint |
 | `aws` | AWS CLI v2 |
 | `gcloud` | Google Cloud SDK, GKE auth plugin |
+| `glab` | GitLab CLI |
 | `ollama` | Ollama server (runs inside the container) |
 | `llm` | Simon Willison's llm CLI with Claude and Ollama plugins (requires `python`) |
 
