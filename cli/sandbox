@@ -300,6 +300,35 @@ cmd_run() {
         fi
     fi
 
+    # Claude Code permissions
+    local skip_permissions
+    skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
+    if [ "$skip_permissions" = "true" ]; then
+        if [ "$firewall" != "strict" ]; then
+            warn "WARNING: skip_permissions is enabled without strict firewall!"
+            warn "This is dangerous — Claude can access any network resource."
+            warn "Set 'firewall: strict' in sandbox.yaml for safety."
+        fi
+    fi
+
+    local skip_permissions_flag=""
+    if [ "$skip_permissions" = "true" ]; then
+        skip_permissions_flag="--dangerously-skip-permissions"
+    fi
+
+    # Resource limits
+    local memory_limit
+    memory_limit=$(config_get '.resources.memory')
+    if [ -n "$memory_limit" ]; then
+        docker_args+=("--memory" "$memory_limit")
+    fi
+
+    local cpu_limit
+    cpu_limit=$(config_get '.resources.cpus')
+    if [ -n "$cpu_limit" ]; then
+        docker_args+=("--cpus" "$cpu_limit")
+    fi
+
     # Run
     if [ "$mode" = "headless" ]; then
         if [ ${#passthrough_args[@]} -eq 0 ]; then
@@ -312,9 +341,17 @@ cmd_run() {
         local log_file="${log_dir}/$(date +%Y%m%d-%H%M%S).log"
         log "Running sandbox-${name} in headless mode..."
         log "Output will be saved to: $log_file"
-        docker run "${docker_args[@]}" \
+
+        local timeout_val
+        timeout_val=$(config_get '.claude.timeout')
+        local timeout_cmd=""
+        if [ -n "$timeout_val" ]; then
+            timeout_cmd="timeout $timeout_val"
+        fi
+
+        $timeout_cmd docker run "${docker_args[@]}" \
             "sandbox-${name}:latest" \
-            claude -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+            claude ${skip_permissions_flag} -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${docker_args[@]}" \
@@ -478,6 +515,15 @@ firewall: open
 claude:
   mode: interactive
   args: []
+# claude:
+#   mode: interactive
+#   skip_permissions: false   # auto-adds --dangerously-skip-permissions
+#   timeout: 30m              # headless mode timeout
+#   args: []
+
+# resources:
+#   memory: 4g
+#   cpus: 2
 YAML
 
     log "Created sandbox.yaml for '${name}'"
