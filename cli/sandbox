@@ -41,14 +41,19 @@ find_config() {
 }
 
 config_get() {
-    yq -r "$1 // empty" "$CONFIG_FILE"
+    local val
+    val=$(yq -r "$1" "$CONFIG_FILE" 2>/dev/null) || true
+    if [ "$val" = "null" ] || [ -z "$val" ]; then
+        return 0
+    fi
+    echo "$val"
 }
 
 config_get_default() {
     local query="$1"
     local default="$2"
     local val
-    val=$(yq -r "$query // empty" "$CONFIG_FILE")
+    val=$(config_get "$query")
     echo "${val:-$default}"
 }
 
@@ -65,6 +70,84 @@ cmd_build_base() {
         -t sandbox-base:latest \
         "$SANDBOX_ROOT"
     log "Base image built: sandbox-base:latest"
+}
+
+cmd_build() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    log "Building project image: sandbox-${name}:latest"
+
+    # Generate Dockerfile from template
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap "rm -rf $tmpdir" EXIT
+
+    local dockerfile="$tmpdir/Dockerfile"
+    local features_block=""
+    local packages_block=""
+    local setup_block=""
+
+    # Features
+    while IFS= read -r feature; do
+        [ -z "$feature" ] && continue
+        local script="$SANDBOX_ROOT/features/${feature}.sh"
+        if [ ! -f "$script" ]; then
+            error "Feature script not found: $script"
+            exit 1
+        fi
+        cp "$script" "$tmpdir/${feature}.sh"
+        features_block="${features_block}COPY ${feature}.sh /tmp/${feature}.sh
+RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm /tmp/${feature}.sh
+"
+    done < <(config_get '.features[]')
+
+    # Packages
+    local packages=""
+    while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
+        packages="${packages} ${pkg}"
+    done < <(config_get '.packages[]')
+    if [ -n "$packages" ]; then
+        packages_block="RUN apt-get update && apt-get install -y --no-install-recommends${packages} && rm -rf /var/lib/apt/lists/*"
+    fi
+
+    # Custom setup script
+    local setup_path
+    setup_path=$(config_get '.setup')
+    if [ -n "$setup_path" ]; then
+        if [ ! -f "$setup_path" ]; then
+            error "Setup script not found: $setup_path"
+            exit 1
+        fi
+        cp "$setup_path" "$tmpdir/custom-setup.sh"
+        setup_block="COPY custom-setup.sh /tmp/custom-setup.sh
+RUN chmod +x /tmp/custom-setup.sh && /tmp/custom-setup.sh && rm /tmp/custom-setup.sh"
+    fi
+
+    # Generate Dockerfile by reading template and replacing placeholders
+    # (Using line-by-line replacement to avoid awk/sed issues with & in strings)
+    while IFS= read -r line; do
+        case "$line" in
+            *%%FEATURES%%*) printf '%s\n' "$features_block" ;;
+            *%%PACKAGES%%*) printf '%s\n' "$packages_block" ;;
+            *%%SETUP%%*)    printf '%s\n' "$setup_block" ;;
+            *)              printf '%s\n' "$line" ;;
+        esac
+    done < "$SANDBOX_ROOT/templates/Dockerfile.project.tmpl" > "$dockerfile"
+
+    # Build
+    docker build \
+        -f "$dockerfile" \
+        -t "sandbox-${name}:latest" \
+        "$tmpdir"
+
+    log "Project image built: sandbox-${name}:latest"
 }
 
 cmd_help() {
@@ -89,6 +172,7 @@ USAGE
 
 case "${1:-help}" in
     build-base)   cmd_build_base ;;
+    build)        cmd_build ;;
     help|-h|--help) cmd_help ;;
     *)
         error "Unknown command: $1"
