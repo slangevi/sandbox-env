@@ -88,11 +88,17 @@ if [ -n "$HOST_IP" ]; then
     iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT
 fi
 
-# 8b. Replace broad DNS rule with restricted Docker-resolver-only rule
+# 8b. Replace broad DNS rule with restricted resolver-only rule
+# Detect the actual DNS resolver (127.0.0.11 on Linux Docker, varies on Docker Desktop)
+DNS_RESOLVER=$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)
+if [ -z "$DNS_RESOLVER" ]; then
+    DNS_RESOLVER="127.0.0.11"
+fi
+echo "Restricting DNS to resolver: $DNS_RESOLVER"
 iptables -D OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -D INPUT -p udp --sport 53 -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -d 127.0.0.11 -j ACCEPT
-iptables -A INPUT -p udp --sport 53 -s 127.0.0.11 -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
+iptables -A INPUT -p udp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
 
 # 8c. SSH restricted to allowed domains only (applied after ipset is populated)
 iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
@@ -128,7 +134,7 @@ if curl --connect-timeout 5 -sf https://example.com >/dev/null 2>&1; then
 fi
 echo "Firewall active. Blocked domains are unreachable."
 
-# Verify an allowed domain is reachable
-if ! curl --connect-timeout 10 -sf https://api.anthropic.com >/dev/null 2>&1; then
+# Verify an allowed domain is reachable (use -o /dev/null without -f since API returns 401 without auth)
+if ! curl --connect-timeout 10 -so /dev/null https://api.anthropic.com 2>/dev/null; then
     echo "WARNING: Firewall may be too restrictive — could not reach api.anthropic.com"
 fi
