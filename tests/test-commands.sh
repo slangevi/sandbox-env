@@ -74,11 +74,23 @@ check_output "claude-local requires ollama feature" "ollama feature is required"
 # -- remote-local command --
 check_fails "remote-local fails without model" bash -c "cd $FIXTURES && $SANDBOX remote-local"
 
-# -- ollama command (no running container) --
-check_output "ollama fails without running container" "No running sandbox" bash -c "cd $FIXTURES && $SANDBOX ollama list"
+# -- ollama command (no image) --
+TEST_TMPDIR2=$(mktemp -d)
+cat > "$TEST_TMPDIR2/sandbox.yaml" <<'EOF'
+name: no-image-ollama-test
+firewall: open
+EOF
+check_output "ollama fails without image" "Project image not found" bash -c "cd $TEST_TMPDIR2 && $SANDBOX ollama list"
+rm -rf "$TEST_TMPDIR2"
 
-# -- llm command (no running container) --
-check_output "llm fails without running container" "No running sandbox" bash -c "cd $FIXTURES && $SANDBOX llm test"
+# -- llm command (no image) --
+TEST_TMPDIR3=$(mktemp -d)
+cat > "$TEST_TMPDIR3/sandbox.yaml" <<'EOF'
+name: no-image-llm-test
+firewall: open
+EOF
+check_output "llm fails without image" "Project image not found" bash -c "cd $TEST_TMPDIR3 && $SANDBOX llm test"
+rm -rf "$TEST_TMPDIR3"
 
 # -- models command --
 check_output "models shows help" "Usage:" "$SANDBOX" models
