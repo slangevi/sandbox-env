@@ -670,13 +670,22 @@ cmd_llm() {
         exit 1
     fi
 
+    # If container is running, exec into it
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
         docker exec -it "sandbox-${name}" -- bash -lc 'llm "$@"' _ "$@"
         return
     fi
 
-    error "No running sandbox. Start one first with 'sandbox run' or 'sandbox claude', then use 'sandbox llm' to interact."
-    exit 1
+    # Otherwise start a new container and run llm
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _build_docker_args "$name"
+    docker run "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        bash -lc 'llm "$@"' _ "$@"
 }
 
 cmd_shell() {
