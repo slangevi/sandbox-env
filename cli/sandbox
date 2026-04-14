@@ -440,6 +440,164 @@ cmd_run() {
     fi
 }
 
+cmd_claude() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    # Check if container is already running — exec into it
+    if docker container inspect "sandbox-${name}" &>/dev/null; then
+        log "Attaching to Claude Code in sandbox-${name}..."
+        docker exec -it "sandbox-${name}" claude "$@"
+        return
+    fi
+
+    # Otherwise start a new container with Claude Code
+    log "Starting Claude Code in sandbox-${name}..."
+
+    local docker_args=(
+        "--name" "sandbox-${name}"
+        "--rm"
+        "--hostname" "sandbox"
+        "--security-opt" "no-new-privileges"
+        "--pids-limit" "256"
+    )
+
+    # Volumes
+    docker_args+=("-v" "sandbox-${name}-claude:/home/node/.claude")
+    docker_args+=("-v" "sandbox-${name}-home:/home/node/.persistent")
+    docker_args+=("-v" "sandbox-${name}-cache:/home/node/.cache")
+
+    # Check for ollama feature
+    local has_ollama=false
+    while IFS= read -r feature; do
+        [ "$feature" = "ollama" ] && has_ollama=true
+    done < <(config_get '.features[]')
+    if $has_ollama; then
+        docker_args+=("-v" "sandbox-ollama-models:/home/node/.ollama")
+    fi
+
+    # Default workspace mount
+    local has_mounts=false
+    local mount_count
+    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
+        for i in $(seq 0 $((mount_count - 1))); do
+            has_mounts=true
+            local host_path container_path readonly_flag
+            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
+            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
+            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
+            host_path="${host_path/#\~/$HOME}"
+            if [[ "$host_path" == .* ]]; then
+                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
+            fi
+            local mount_spec="${host_path}:${container_path}"
+            if [ "$readonly_flag" = "true" ]; then
+                mount_spec="${mount_spec}:ro"
+            fi
+            docker_args+=("-v" "$mount_spec")
+        done
+    fi
+    if ! $has_mounts; then
+        docker_args+=("-v" "$(pwd):/workspace")
+    fi
+
+    # Env vars
+    local env_keys
+    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        case "$key" in
+            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
+            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
+            EDITOR|VISUAL|DOCKER_HOST|\
+            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
+            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
+                continue ;;
+        esac
+        local val
+        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
+        docker_args+=("-e" "${key}=${val}")
+    done <<< "$env_keys"
+
+    # Git config
+    local git_keys
+    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        case "$key" in
+            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff) ;;
+            *) continue ;;
+        esac
+        local val
+        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
+        local env_key
+        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
+        docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
+    done <<< "$git_keys"
+
+    # Firewall
+    local firewall
+    firewall=$(config_get_default '.firewall' 'open')
+    docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
+    if [ "$firewall" = "strict" ]; then
+        docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
+    fi
+
+    # Resource limits
+    local memory_limit
+    memory_limit=$(config_get '.resources.memory')
+    [ -n "$memory_limit" ] && docker_args+=("--memory" "$memory_limit")
+    local cpu_limit
+    cpu_limit=$(config_get '.resources.cpus')
+    [ -n "$cpu_limit" ] && docker_args+=("--cpus" "$cpu_limit")
+
+    # Skip permissions
+    local skip_flag=""
+    local skip_permissions
+    skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
+    if [ "$skip_permissions" = "true" ]; then
+        skip_flag="--dangerously-skip-permissions"
+        if [ "$firewall" != "strict" ]; then
+            warn "WARNING: skip_permissions enabled without strict firewall!"
+        fi
+    fi
+
+    docker run -it "${docker_args[@]}" \
+        "sandbox-${name}:latest" \
+        claude $skip_flag "$@"
+}
+
+cmd_ollama() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    # Check if container is already running — exec into it
+    if docker container inspect "sandbox-${name}" &>/dev/null; then
+        shift # remove 'ollama' from args
+        docker exec -it "sandbox-${name}" ollama "${@:-run}"
+        return
+    fi
+
+    error "No running sandbox. Start one first with 'sandbox run' or 'sandbox claude', then use 'sandbox ollama' to interact."
+    exit 1
+}
+
 cmd_shell() {
     find_config
     local name
@@ -771,6 +929,8 @@ Commands:
   build-base          Build the base sandbox image
   build [--no-cache]   Build project image from sandbox.yaml
   run [--headless]    Run the sandbox container
+  claude              Launch Claude Code directly
+  ollama <cmd>        Run Ollama commands in the sandbox
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
   shell               Open a shell in the running sandbox
@@ -793,6 +953,8 @@ case "${1:-help}" in
     build-base)     cmd_build_base ;;
     build)          shift; cmd_build "$@" ;;
     run)            cmd_run "$@" ;;
+    claude)         shift; cmd_claude "$@" ;;
+    ollama)         cmd_ollama "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
     shell)          cmd_shell ;;

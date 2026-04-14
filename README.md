@@ -147,6 +147,8 @@ Drop a script in `features/`. It must:
 sandbox build-base          Build the base image (once, or to update)
 sandbox build               Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
+sandbox claude              Launch Claude Code directly
+sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox login               Authenticate Claude Code for this project
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
@@ -162,17 +164,14 @@ sandbox init                Generate a starter sandbox.yaml
 ### Running Claude Code
 
 ```bash
-# Interactive session — drops into a shell with claude available
-sandbox run
+# Launch Claude Code directly
+sandbox claude
 
-# One-off prompt
-sandbox run -- claude -p "Refactor the auth module"
+# With a one-off prompt
+sandbox claude -p "Refactor the auth module"
 
-# In a running container
-sandbox exec claude -p "Explain this codebase"
-
-# Start Claude Code interactively inside the container
-sandbox exec claude
+# If a sandbox is already running, attaches to it
+# If not, starts a new container with Claude Code
 ```
 
 ### Headless mode
@@ -303,10 +302,15 @@ features:
   - ollama
 ```
 
-Ollama starts automatically when the container launches. Inside the container:
+Ollama starts automatically when the container launches. Use the convenience command:
 
 ```bash
-ollama run llama3.2 "Explain this code"
+# Start a sandbox, then chat with a model
+sandbox run
+sandbox ollama run llama3.2
+
+# Or run a one-off prompt
+sandbox ollama run llama3.2 "Explain this code"
 ```
 
 ## LLM CLI
