@@ -198,8 +198,8 @@ Start the sandbox once, then run commands instantly without container startup ov
 
 ```bash
 sandbox start                        # starts in background
-sandbox llm "Summarize this code"    # fast — exec into running container
-sandbox llm "Explain this error"     # fast again
+sandbox llm -m ollama/llama3.2 "Summarize this code"  # fast
+sandbox llm -m ollama/llama3.2 "Explain this error"   # fast again
 sandbox claude                       # launch Claude Code in the same container
 sandbox shell                        # open a shell
 sandbox stop                         # when done
@@ -419,21 +419,26 @@ features:
 
 Run prompts from outside the container:
 
-With a running sandbox (`sandbox run` or `sandbox claude`):
+The `llm` CLI requires a model to be specified. Use `-m` to pick one, or set a default:
 
 ```bash
-# One-off prompt
-sandbox llm "Summarize this code"
+# Use a local Ollama model (free)
+sandbox llm -m ollama/llama3.2 "Summarize this code"
 
-# With a specific model
+# Use Claude via API (requires llm API key setup)
 sandbox llm -m claude-3.5-sonnet "Explain this error"
 
-# Using local Ollama models
-sandbox llm -m ollama/llama3.2 "What does this function do?"
+# Set a default model so you don't need -m every time
+sandbox exec bash -lc 'llm models default ollama/llama3.2'
+
+# Now just:
+sandbox llm "What does this function do?"
 
 # Pipe input (via sandbox exec for stdin support)
-sandbox exec bash -c 'cat /workspace/main.py | llm "Review this code"'
+sandbox exec bash -c 'cat /workspace/main.py | llm -m ollama/llama3.2 "Review this code"'
 ```
+
+The default model persists across container restarts (stored in the persistent home volume).
 
 ## Testing
 

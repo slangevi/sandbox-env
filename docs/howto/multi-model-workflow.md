@@ -147,13 +147,18 @@ Headless output is saved to `~/.sandbox/logs/<name>/` and printed to stdout. Che
 The `llm` CLI passes arguments directly to the tool, so any `llm` flags work:
 
 ```bash
-sandbox llm "What does a Python context manager do?"
+# Use a local Ollama model (free)
+sandbox llm -m ollama/llama3.2 "What does a Python context manager do?"
 
 # Pass text via stdin
-git diff HEAD~1 | sandbox llm -s "Summarize these changes in plain English"
+git diff HEAD~1 | sandbox llm -m ollama/llama3.2 -s "Summarize these changes in plain English"
 
-# Use a specific model
+# Use Claude via API (higher quality)
 sandbox llm -m claude-3.5-sonnet "Write a Python function that validates an email address"
+
+# Set a default model so you don't need -m every time
+sandbox exec bash -lc 'llm models default ollama/llama3.2'
+sandbox llm "What does a Python context manager do?"   # uses default
 ```
 
 ### What to use `sandbox llm` for
@@ -346,7 +351,6 @@ sandbox claude -p "do X"            # with a starting prompt
 sandbox run --headless -- "do X"           # non-interactive, logged
 
 # llm CLI (quick tasks)
-sandbox llm "question"                      # default model
 sandbox llm -m ollama/llama3.2 "question"  # local, free
 sandbox llm -m claude-3.5-sonnet "question" # API, quality
 
