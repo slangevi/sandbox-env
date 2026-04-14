@@ -87,14 +87,19 @@ if [ -d /home/node/.ollama ]; then
 fi
 
 # Apply git config from SANDBOX_GIT_* env vars (set by CLI from sandbox.yaml)
-# Format: SANDBOX_GIT_<KEY>=<VALUE> where KEY uses __ for dots
-# e.g. SANDBOX_GIT_USER__NAME="Your Name" -> git config --global user.name "Your Name"
 while IFS='=' read -r var val; do
     [ -z "$var" ] && continue
-    # Strip SANDBOX_GIT_ prefix, lowercase, replace __ with .
     local_key="${var#SANDBOX_GIT_}"
     local_key=$(echo "$local_key" | tr '[:upper:]' '[:lower:]' | sed 's/__/./g')
-    gosu node git config --global "$local_key" "$val"
+    # Whitelist safe keys — defense in depth (CLI also whitelists)
+    case "$local_key" in
+        user.name|user.email|init.defaultbranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff)
+            gosu node git config --global "$local_key" "$val"
+            ;;
+        *)
+            echo "WARNING: Blocked git config key '$local_key' in entrypoint"
+            ;;
+    esac
 done < <(env | grep '^SANDBOX_GIT_' | sort)
 
 # Drop privileges and execute the user's command as the node user

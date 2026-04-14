@@ -455,7 +455,6 @@ cmd_remote() {
     fi
 
     # Parse optional args
-    shift # remove 'remote' from args
     local session_name="${name}"
     local spawn_mode="same-dir"
     while [ $# -gt 0 ]; do
@@ -492,7 +491,7 @@ cmd_claude() {
     fi
 
     # Check if container is already running — exec into it
-    if docker container inspect "sandbox-${name}" &>/dev/null; then
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
         log "Attaching to Claude Code in sandbox-${name}..."
         docker exec -it "sandbox-${name}" claude "$@"
         return
@@ -551,6 +550,7 @@ cmd_claude_local() {
     fi
     local model="$1"
     shift
+    validate_model "$model"
 
     # Check ollama feature
     local has_ollama=false
@@ -563,7 +563,7 @@ cmd_claude_local() {
     fi
 
     # Check if container is already running — exec into it
-    if docker container inspect "sandbox-${name}" &>/dev/null; then
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
         log "Attaching to Claude Code (local: $model) in sandbox-${name}..."
         docker exec -it \
             -e ANTHROPIC_AUTH_TOKEN=ollama \
@@ -608,6 +608,7 @@ cmd_remote_local() {
     fi
     local model="$1"
     shift
+    validate_model "$model"
 
     # Check ollama feature
     local has_ollama=false
@@ -656,8 +657,7 @@ cmd_ollama() {
     fi
 
     # Check if container is already running — exec into it
-    if docker container inspect "sandbox-${name}" &>/dev/null; then
-        shift # remove 'ollama' from args
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
         docker exec -it "sandbox-${name}" ollama "${@:-run}"
         return
     fi
@@ -746,6 +746,8 @@ cmd_login() {
 
     docker run -it --rm \
         --hostname sandbox \
+        --security-opt no-new-privileges \
+        --pids-limit 256 \
         -v "${claude_volume}:/home/node/.claude" \
         "sandbox-${name}:latest" \
         claude login
@@ -807,7 +809,7 @@ cmd_exec() {
         exit 1
     fi
 
-    if ! docker container inspect "sandbox-${name}" &>/dev/null; then
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" != "true" ]; then
         error "No running sandbox found. Run 'sandbox run' first."
         exit 1
     fi
@@ -818,7 +820,7 @@ cmd_exec() {
         exit 1
     fi
 
-    docker exec -it "sandbox-${name}" "$@"
+    docker exec -it "sandbox-${name}" -- "$@"
 }
 
 cmd_models() {
@@ -941,19 +943,20 @@ cmd_init() {
     cat > sandbox.yaml <<YAML
 name: ${name}
 
-features: []
-  # - python
-  # - node-extra
-  # - rust
-  # - go
-  # - aws
-  # - gcloud
-  # - ollama
-  # - llm
+# features:
+#   - python
+#   - node-extra
+#   - rust
+#   - go
+#   - aws
+#   - gcloud
+#   - glab
+#   - ollama
+#   - llm
 
-packages: []
-  # - ripgrep
-  # - tree
+# packages:
+#   - ripgrep
+#   - tree
 
 env: {}
 
@@ -1025,10 +1028,10 @@ case "${1:-help}" in
     build)          shift; cmd_build "$@" ;;
     run)            cmd_run "$@" ;;
     claude)         shift; cmd_claude "$@" ;;
-    remote)         cmd_remote "$@" ;;
+    remote)         shift; cmd_remote "$@" ;;
     claude-local)   shift; cmd_claude_local "$@" ;;
     remote-local)   shift; cmd_remote_local "$@" ;;
-    ollama)         cmd_ollama "$@" ;;
+    ollama)         shift; cmd_ollama "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
     shell)          cmd_shell ;;

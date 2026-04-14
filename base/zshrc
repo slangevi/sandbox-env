@@ -1,4 +1,6 @@
 # sandbox zsh config
+# Source profile.d scripts (Rust, Go, Ollama env vars)
+for f in /etc/profile.d/*.sh; do [ -f "$f" ] && source "$f"; done
 # History persists via the .persistent volume (symlinked by entrypoint)
 export HISTFILE="$HOME/.zsh_history"
 export HISTSIZE=10000
@@ -9,9 +11,6 @@ setopt HIST_IGNORE_DUPS
 # fzf keybindings
 [ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && source /usr/share/doc/fzf/examples/key-bindings.zsh
 [ -f /usr/share/doc/fzf/examples/completion.zsh ] && source /usr/share/doc/fzf/examples/completion.zsh
-
-# Source persistent env vars (npm prefix, etc.) set by entrypoint
-[ -f /etc/profile.d/sandbox-persistent.sh ] && source /etc/profile.d/sandbox-persistent.sh
 
 # git-delta config
 export GIT_PAGER="delta --dark"
