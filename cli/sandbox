@@ -671,7 +671,7 @@ cmd_llm() {
     fi
 
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
-        docker exec -it "sandbox-${name}" -- bash -lc "llm $*"
+        docker exec -it "sandbox-${name}" -- bash -lc 'llm "$@"' _ "$@"
         return
     fi
 

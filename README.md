@@ -439,6 +439,21 @@ tests/test-cli-errors.sh
 # Test run modes, exec, readonly mounts
 tests/test-run-modes.sh
 
+# Test volume lifecycle, persistence, cleanup
+tests/test-volumes.sh
+
+# Test git config from sandbox.yaml
+tests/test-git-config.sh
+
+# Test headless mode and output capture
+tests/test-headless.sh
+
+# Test convenience commands (claude, ollama, llm, models)
+tests/test-commands.sh
+
+# Test YAML parsing and validation
+tests/test-yaml-validation.sh
+
 # Test firewall (requires NET_ADMIN capability)
 tests/test-firewall.sh
 

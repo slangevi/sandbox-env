@@ -17,6 +17,11 @@ tests/test-base.sh           # Base image tools verification
 tests/test-cli.sh             # CLI happy-path commands
 tests/test-cli-errors.sh      # Error handling and input validation
 tests/test-run-modes.sh       # Run modes, exec, readonly mounts
+tests/test-volumes.sh          # Volume lifecycle, persistence, cleanup
+tests/test-git-config.sh       # Git config from sandbox.yaml
+tests/test-headless.sh         # Headless mode and output capture
+tests/test-commands.sh         # Convenience commands (claude, ollama, llm, models)
+tests/test-yaml-validation.sh  # YAML parsing and validation
 tests/test-integration.sh     # End-to-end: build base + project, verify tools
 
 # Test a single feature script in isolation
@@ -65,7 +70,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 - After any change: `bash -n cli/sandbox` to syntax-check, then `cd tests/fixtures && ../../cli/sandbox build && ../../cli/sandbox run -- echo "works" && ../../cli/sandbox clean`.
 - The global arrays `DOCKER_ARGS`, `CLAUDE_EXTRA_ARGS`, and `SKIP_PERMISSIONS_FLAG` are set by helpers and consumed by callers. Don't declare them as `local`.
 - yq on this system is Mike Farah's yq v4. Syntax differs from jq-based yq. Use `yq -r '.key'` not `yq -r '.key // empty'`.
-- The dispatch `case` statement does `shift` before calling commands that accept args (`claude`, `claude-local`, `remote`, `remote-local`, `ollama`, `llm`, `run`, `build`, `exec`, `models`).
+- The dispatch `case` statement does `shift` before calling commands that accept args (`claude`, `claude-local`, `remote`, `remote-local`, `ollama`, `llm`, `run`, `build`). Two exceptions: `exec` and `models` receive full `"$@"` and handle the shift internally.
 
 ## When Adding a Feature Script
 
