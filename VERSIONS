@@ -26,8 +26,8 @@ cargo-watch=8                     # features/rust.sh (major version pin)
 cargo-edit=0.13                   # features/rust.sh (major.minor pin)
 
 # Ollama (features/ollama.sh + cli/sandbox)
-ollama=0.9.0                      # features/ollama.sh (binary)
-ollama-image=0.9.0                # cli/sandbox cmd_models (Docker image)
+ollama=0.20.7                     # features/ollama.sh (via install script)
+ollama-image=0.20.7               # cli/sandbox cmd_models (Docker image)
 
 # AWS CLI (features/aws.sh)
 aws-cli=2.27.30                   # features/aws.sh
