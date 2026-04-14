@@ -128,7 +128,7 @@ cmd_build() {
     validate_name "$name"
 
     # Check base image exists
-    if ! docker image inspect sandbox-base:latest &>/dev/null; then
+    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
         error "Base image not found. Run 'sandbox build-base' first."
         exit 1
     fi
@@ -214,7 +214,7 @@ cmd_run() {
     fi
 
     # Check image exists
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
@@ -460,7 +460,7 @@ cmd_remote() {
         exit 1
     fi
 
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
@@ -497,7 +497,7 @@ cmd_claude() {
         exit 1
     fi
 
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
@@ -529,7 +529,7 @@ cmd_claude_local() {
         exit 1
     fi
 
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
@@ -589,7 +589,7 @@ cmd_remote_local() {
         exit 1
     fi
 
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
@@ -747,7 +747,7 @@ cmd_login() {
     fi
 
     # Check image exists
-    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
         error "Project image not found. Run 'sandbox build' first."
         exit 1
     fi
