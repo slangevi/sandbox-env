@@ -84,12 +84,11 @@ mounts:
     container: /workspace
 
 # Strict firewall is the default and recommended setting.
-# List every external domain your app needs to reach during development.
+# The base whitelist already includes: Claude API, GitHub, GitLab, npm, sentry, statsig.
+# The python feature auto-adds: pypi.org, files.pythonhosted.org.
+# Only add domains specific to YOUR project here:
 firewall: strict
 allowed_domains:
-  - pypi.org
-  - files.pythonhosted.org
-  - registry.npmjs.org
   - api.stripe.com          # example: payment provider
   - api.sendgrid.com        # example: email provider
   - fonts.googleapis.com    # example: Google Fonts CDN
@@ -439,10 +438,8 @@ wildcard-style entries like entire CDNs when only one subdomain is needed:
 ```yaml
 firewall: strict
 allowed_domains:
-  # Python and Node package registries (needed for install steps)
-  - pypi.org
-  - files.pythonhosted.org
-  - registry.npmjs.org
+  # Only add domains NOT already in the base whitelist or feature configs.
+  # (pypi.org, npmjs.org, GitHub, GitLab, Claude API are already included.)
 
   # Your application's external API dependencies
   - api.openai.com

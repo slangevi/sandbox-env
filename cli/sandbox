@@ -756,6 +756,10 @@ cmd_shell() {
         error "sandbox.yaml must have a 'name' field."
         exit 1
     fi
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" != "true" ]; then
+        error "No running sandbox. Run 'sandbox start' first."
+        exit 1
+    fi
     log "Opening shell in sandbox-${name}..."
     docker exec -it "sandbox-${name}" /bin/zsh
 }
@@ -904,7 +908,7 @@ cmd_exec() {
     fi
 
     local tty_flag=""
-    if [ -t 0 ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
         tty_flag="-it"
     fi
     docker exec $tty_flag "sandbox-${name}" "$@"

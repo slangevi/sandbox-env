@@ -52,5 +52,11 @@ jobs:
       - name: Test YAML validation
         run: tests/test-yaml-validation.sh
 
+      - name: Test CLI integration (start, exec, stop lifecycle)
+        run: tests/test-cli-integration.sh
+
+      - name: Test entrypoint (PATH, volumes, permissions, services)
+        run: tests/test-entrypoint.sh
+
       - name: Test integration (python + llm)
         run: tests/test-integration.sh

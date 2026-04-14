@@ -22,6 +22,8 @@ tests/test-git-config.sh       # Git config from sandbox.yaml
 tests/test-headless.sh         # Headless mode and output capture
 tests/test-commands.sh         # Convenience commands (claude, ollama, llm, models)
 tests/test-yaml-validation.sh  # YAML parsing and validation
+tests/test-cli-integration.sh  # Every CLI command end-to-end (start, exec, stop lifecycle)
+tests/test-entrypoint.sh       # Entrypoint: PATH, volumes, permissions, services (slow)
 tests/test-integration.sh     # End-to-end: build base + project, verify tools
 
 # Test a single feature script in isolation
@@ -41,7 +43,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 **`cli/sandbox`** — The entire CLI is one bash script. Key internal structure:
 
 - **Shared helpers** (used by multiple commands):
-  - `_build_docker_args "$name"` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`.
+  - `_build_docker_args "$name"` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_llm`, `cmd_ollama`.
   - `_read_claude_config` — Sets global `CLAUDE_EXTRA_ARGS` array and `SKIP_PERMISSIONS_FLAG` string from `sandbox.yaml`. Used by same commands.
   - `config_get` / `config_get_default` — YAML reading via Mike Farah's yq v4 (NOT jq-syntax yq).
 

@@ -38,8 +38,6 @@ mounts:
     container: /workspace
 
 firewall: strict
-allowed_domains:
-  - api.anthropic.com
 
 git:
   user.name: Your Name
@@ -51,7 +49,7 @@ claude:
 
 **Feature order matters:** `python` must come before `llm` — `llm` checks for Python at build time and will fail if it isn't present.
 
-**Firewall note:** `firewall: strict` is the default and is recommended. With `api.anthropic.com` in `allowed_domains`, Claude Code and `llm` calls to Anthropic's API work. Ollama runs entirely inside the container and needs no external access.
+**Firewall note:** `firewall: strict` is the default and is recommended. The base firewall whitelist already includes `api.anthropic.com`, so Claude Code and `llm` API calls work without adding it to `allowed_domains`. Ollama runs entirely inside the container and needs no external access. Only add domains to `allowed_domains` for services not already whitelisted (your own APIs, etc.).
 
 ---
 
