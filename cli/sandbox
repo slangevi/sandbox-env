@@ -485,7 +485,7 @@ cmd_remote() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_claude() {
@@ -639,7 +639,7 @@ cmd_remote_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude remote-control --model "$model" --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_ollama() {
