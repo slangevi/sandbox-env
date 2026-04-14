@@ -276,7 +276,7 @@ cmd_run() {
 
         $timeout_cmd docker run "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest" \
-            claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+            claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${DOCKER_ARGS[@]}" \
@@ -485,7 +485,7 @@ cmd_remote() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_claude() {
@@ -517,7 +517,7 @@ cmd_claude() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" "$@"
+        claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} "$@"
 }
 
 cmd_claude_local() {
@@ -577,7 +577,7 @@ cmd_claude_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" "$@"
+        claude --model "$model" $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} "$@"
 }
 
 cmd_remote_local() {
@@ -639,7 +639,7 @@ cmd_remote_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude --model "$model" $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_ollama() {
