@@ -80,7 +80,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV DEVCONTAINER=true \
     SHELL=/bin/zsh \
     EDITOR=nano \
-    VISUAL=nano
+    VISUAL=nano \
+    CLAUDE_CODE_SKIP_AUTO_UPDATE=1
 
 # Entrypoint runs as root to init firewall/services, then drops to node
 # USER node  -- removed, entrypoint handles privilege drop
