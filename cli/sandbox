@@ -654,7 +654,7 @@ cmd_ollama() {
 
     # If container is running, exec into it
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
-        docker exec -it "sandbox-${name}" -- ollama "${@:-run}"
+        docker exec -it "sandbox-${name}" ollama "${@:-run}"
         return
     fi
 
@@ -681,7 +681,7 @@ cmd_llm() {
 
     # If container is running, exec into it
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
-        docker exec -it "sandbox-${name}" -- bash -lc 'llm "$@"' _ "$@"
+        docker exec -it "sandbox-${name}" bash -lc 'llm "$@"' _ "$@"
         return
     fi
 
@@ -903,7 +903,7 @@ cmd_exec() {
         exit 1
     fi
 
-    docker exec -it "sandbox-${name}" -- "$@"
+    docker exec -it "sandbox-${name}" "$@"
 }
 
 cmd_models() {
