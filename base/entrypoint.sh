@@ -75,7 +75,7 @@ if [ -d "$PERSISTENT" ]; then
     # Write env vars to a profile script so all shells pick them up
     cat > /etc/profile.d/sandbox-persistent.sh <<PROFILE
 export NPM_CONFIG_PREFIX="$PERSISTENT/npm-global"
-export PATH="$PERSISTENT/npm-global/bin:\$PATH"
+export PATH="/home/node/.local/bin:$PERSISTENT/npm-global/bin:\$PATH"
 PROFILE
 fi
 
