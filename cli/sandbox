@@ -338,7 +338,7 @@ cmd_run() {
 
     # Firewall mode
     local firewall
-    firewall=$(config_get_default '.firewall' 'open')
+    firewall=$(config_get_default '.firewall' 'strict')
     docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
 
     if [ "$firewall" = "strict" ]; then
@@ -552,7 +552,7 @@ cmd_remote() {
     done <<< "$git_keys"
 
     local firewall
-    firewall=$(config_get_default '.firewall' 'open')
+    firewall=$(config_get_default '.firewall' 'strict')
     docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
     if [ "$firewall" = "strict" ]; then
         docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
@@ -678,7 +678,7 @@ cmd_claude() {
 
     # Firewall
     local firewall
-    firewall=$(config_get_default '.firewall' 'open')
+    firewall=$(config_get_default '.firewall' 'strict')
     docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
     if [ "$firewall" = "strict" ]; then
         docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
@@ -1027,7 +1027,7 @@ mounts:
   - host: .
     container: /workspace
 
-firewall: open
+firewall: strict
 # allowed_domains:
 #   - api.example.com
 

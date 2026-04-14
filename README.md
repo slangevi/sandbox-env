@@ -62,7 +62,7 @@ mounts:
     container: /data
     readonly: true
 
-firewall: open
+firewall: strict
 # allowed_domains:
 #   - api.example.com
 
@@ -79,7 +79,7 @@ claude:
 #   cpus: 2
 ```
 
-All fields except `name` are optional. Defaults: no features, no extra packages, mount `.` to `/workspace`, firewall open, interactive mode.
+All fields except `name` are optional. Defaults: no features, no extra packages, mount `.` to `/workspace`, firewall strict, interactive mode.
 
 ### Git configuration
 
@@ -255,9 +255,9 @@ Globally installed npm packages (including MCP servers installed via `npm instal
 
 Two modes controlled by the `firewall` field in `sandbox.yaml`:
 
-**`open`** (default) — No network restrictions.
+**`strict`** (default) — Default-deny iptables policy.
 
-**`strict`** — Default-deny iptables policy. Only whitelisted domains are reachable:
+**`open`** — No network restrictions. Use when you need unrestricted access (e.g., installing packages from arbitrary sources). Set `firewall: open` in your sandbox.yaml. Only whitelisted domains are reachable:
 - Claude API, npm, GitHub, GitLab (always allowed)
 - Feature-specific domains (e.g., PyPI when `python` is installed)
 - Custom domains via `allowed_domains` in your config

@@ -2,3 +2,4 @@ name: test-project
 features: []
 packages:
   - tree
+firewall: open
