@@ -92,7 +92,7 @@ git:
   init.defaultBranch: main
 ```
 
-Any `git config --global` key works. These are applied on every container start, so commits inside the sandbox always have the correct author.
+The following keys are supported: `user.name`, `user.email`, `init.defaultBranch`, `core.autocrlf`, `core.eol`, `push.default`, `pull.rebase`, `commit.gpgsign`, `tag.gpgsign`, `merge.ff`. These are applied on every container start. Other keys are blocked for security (some git config keys allow command execution).
 
 ### Custom setup script
 

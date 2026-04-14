@@ -570,7 +570,7 @@ cmd_claude_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" "${CLAUDE_EXTRA_ARGS[@]}" "$@"
+        claude --model "$model" $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" "$@"
 }
 
 cmd_remote_local() {
@@ -632,7 +632,7 @@ cmd_remote_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude --model "$model" $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_ollama() {
