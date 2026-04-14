@@ -16,12 +16,12 @@ if ! command -v pipx &>/dev/null; then
     exit 1
 fi
 
-# Install llm via pipx (as node user for correct PATH)
-su - node -c "pipx install llm"
+# Install llm via pipx (as node user for correct PATH) — pinned versions
+su - node -c "pipx install llm==0.24"
 
-# Install plugins
-su - node -c "pipx inject llm llm-claude-3"
-su - node -c "pipx inject llm llm-ollama"
+# Install plugins — pinned versions
+su - node -c "pipx inject llm llm-claude-3==0.19"
+su - node -c "pipx inject llm llm-ollama==0.9.1"
 
 # No additional firewall domains — uses python's pypi.org (already in python.conf)
 

@@ -1,0 +1,47 @@
+# VERSIONS — Pinned package versions for sandbox-env
+# This is a human-readable reference. NOT sourced by scripts.
+# Update versions here as a reference, then update the corresponding files.
+#
+# Format: package=version        # file where it's pinned
+
+# Base image
+node=20.19-slim                   # base/Dockerfile (FROM)
+
+# Base tools (Dockerfile)
+claude-code=latest                # base/Dockerfile — TODO: pin when stable release cadence exists
+git-delta=0.18.2                  # base/Dockerfile
+gosu=1.17                         # base/Dockerfile
+gh=apt-managed                    # base/Dockerfile — version managed by GitHub's apt repo
+
+# Go (features/go.sh)
+go=1.22.5                         # features/go.sh
+golangci-lint=2.1.0               # features/go.sh
+
+# GitLab CLI (features/glab.sh)
+glab=1.92.1                       # features/glab.sh
+
+# Rust (features/rust.sh)
+rust=stable                       # features/rust.sh — rustup stable channel
+cargo-watch=8                     # features/rust.sh (major version pin)
+cargo-edit=0.13                   # features/rust.sh (major.minor pin)
+
+# Ollama (features/ollama.sh + cli/sandbox)
+ollama=0.9.0                      # features/ollama.sh (binary)
+ollama-image=0.9.0                # cli/sandbox cmd_models (Docker image)
+
+# AWS CLI (features/aws.sh)
+aws-cli=2.27.30                   # features/aws.sh
+
+# Google Cloud SDK (features/gcloud.sh)
+gcloud=apt-managed                # features/gcloud.sh — version managed by Google's apt repo
+
+# npm global packages (features/node-extra.sh)
+pnpm=10                           # features/node-extra.sh (major version pin)
+yarn=1.22                         # features/node-extra.sh (major.minor pin)
+tsx=4                              # features/node-extra.sh (major version pin)
+npm-check-updates=17              # features/node-extra.sh (major version pin)
+
+# pip packages (features/llm.sh)
+llm=0.24                          # features/llm.sh
+llm-claude-3=0.19                 # features/llm.sh
+llm-ollama=0.9.1                  # features/llm.sh

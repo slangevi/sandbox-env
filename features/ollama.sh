@@ -4,12 +4,11 @@ set -euo pipefail
 
 echo "=== Installing Ollama feature ==="
 
-# Ensure zstd is available (required by the Ollama installer)
-apt-get update -qq && apt-get install -y --no-install-recommends zstd \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Ollama binary
-curl -fsSL https://ollama.com/install.sh | sh
+# Install Ollama binary — pinned version, direct download (no curl|sh)
+OLLAMA_VERSION="0.9.0"
+curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-$(dpkg --print-architecture)" \
+    -o /usr/local/bin/ollama
+chmod +x /usr/local/bin/ollama
 
 # Create model storage directory (expected to be mounted from host)
 mkdir -p /home/node/.ollama/models

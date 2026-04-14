@@ -19,9 +19,10 @@ echo 'export GOPATH="$HOME/go"' >> /etc/profile.d/go.sh
 export PATH="/usr/local/go/bin:$PATH"
 export GOPATH="/tmp/go-setup"
 
-# Install golangci-lint
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-    | sh -s -- -b /usr/local/bin
+# Install golangci-lint — pinned version
+GOLANGCI_LINT_VERSION="v2.1.0"
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+    | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
 
 # Clean up
 rm -rf "$GOPATH"

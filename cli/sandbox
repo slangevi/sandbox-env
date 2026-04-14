@@ -841,7 +841,7 @@ cmd_models() {
     shift 2 2>/dev/null || true
 
     # Use the official ollama image with the shared models volume
-    local ollama_image="ollama/ollama:latest"
+    local ollama_image="ollama/ollama:0.9.0"
     local ollama_volume="sandbox-ollama-models"
 
     _ollama_run() {

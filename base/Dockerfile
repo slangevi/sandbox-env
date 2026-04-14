@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:20.19-slim
 
 ARG CLAUDE_CODE_VERSION=latest
 ARG DEBIAN_FRONTEND=noninteractive
@@ -39,6 +39,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
+# gh version is managed by GitHub's apt repo — pinned upstream
 
 # git-delta for better diffs
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -54,6 +55,7 @@ RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/1.17/gosu-$(dpk
     && gosu nobody true
 
 # Claude Code CLI
+# TODO: pin to specific version once stable release cadence is established
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # No broad sudo — entrypoint runs as root for firewall/services,
