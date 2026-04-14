@@ -146,7 +146,7 @@ Drop a script in `features/`. It must:
 ```
 sandbox build-base          Build the base image (once, or to update)
 sandbox build [--no-cache]  Build project image from sandbox.yaml
-sandbox run [--headless]    Run the container (interactive or headless)
+sandbox run [--headless] [-- <cmd>]  Run the container, a command, or headless Claude
 sandbox claude              Launch Claude Code (Anthropic API)
 sandbox claude-local <model> Launch Claude Code with a local Ollama model
 sandbox remote              Remote control via claude.ai/code (Anthropic API)
