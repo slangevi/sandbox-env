@@ -146,16 +146,16 @@ The `llm` CLI passes arguments directly to the tool, so any `llm` flags work:
 
 ```bash
 # Use a local Ollama model (free)
-sandbox llm -m ollama/llama3.2 "What does a Python context manager do?"
+sandbox llm -m llama3.2 "What does a Python context manager do?"
 
 # Pass text via stdin
-git diff HEAD~1 | sandbox llm -m ollama/llama3.2 -s "Summarize these changes in plain English"
+git diff HEAD~1 | sandbox llm -m llama3.2 -s "Summarize these changes in plain English"
 
 # Use Claude via API (higher quality)
 sandbox llm -m claude-3.5-sonnet "Write a Python function that validates an email address"
 
 # Set a default model so you don't need -m every time
-sandbox exec bash -lc 'llm models default ollama/llama3.2'
+sandbox exec bash -lc 'llm models default llama3.2'
 sandbox llm "What does a Python context manager do?"   # uses default
 ```
 
@@ -173,11 +173,11 @@ sandbox llm "What does a Python context manager do?"   # uses default
 
 `sandbox llm` supports two classes of models:
 
-**Local Ollama models (free):** The `llm-ollama` plugin is pre-installed. Use `ollama/<model-name>` where the model name matches what you pulled.
+**Local Ollama models (free):** The `llm-ollama` plugin is pre-installed. Use the model name directly (e.g. `llama3.2`, `codellama`) — it matches what you pulled with `sandbox models pull`.
 
 ```bash
-sandbox llm -m ollama/llama3.2 "Summarize this function"
-sandbox llm -m ollama/codellama "Explain what this SQL query does"
+sandbox llm -m llama3.2 "Summarize this function"
+sandbox llm -m codellama "Explain what this SQL query does"
 ```
 
 **Anthropic API models (paid, higher quality):**
@@ -207,7 +207,7 @@ sandbox llm -m claude-3-haiku "Generate a docstring for this function"
 With no `-m` flag, `llm` uses whichever model is configured as default. To set the default to a local model for cost-free operation:
 
 ```bash
-sandbox llm models default ollama/llama3.2
+sandbox llm models default llama3.2
 ```
 
 To set it back to an API model:
@@ -233,7 +233,7 @@ Inside the session, ask Claude to refactor a module. It reads the files, makes c
 ### Step 2: Summarize what changed
 
 ```bash
-git diff HEAD | sandbox llm -m ollama/llama3.2 -s "Summarize these code changes in 3-5 bullet points. Be specific about what was changed and why."
+git diff HEAD | sandbox llm -m llama3.2 -s "Summarize these code changes in 3-5 bullet points. Be specific about what was changed and why."
 ```
 
 The diff goes in via stdin, the summary comes out. No API cost.
@@ -241,7 +241,7 @@ The diff goes in via stdin, the summary comes out. No API cost.
 ### Step 3: Generate a commit message
 
 ```bash
-git diff --staged | sandbox llm -m ollama/llama3.2 -s "Write a git commit message for these changes. Use the conventional commits format (type: description). Keep the subject line under 72 characters."
+git diff --staged | sandbox llm -m llama3.2 -s "Write a git commit message for these changes. Use the conventional commits format (type: description). Keep the subject line under 72 characters."
 ```
 
 Review the output, adjust if needed, then commit.
@@ -294,7 +294,7 @@ echo "What is a monoid?" | sandbox ollama run llama3.2
 
 ### What is free
 
-- `sandbox llm -m ollama/<model>` — runs entirely in the container
+- `sandbox llm -m <model>` (Ollama models) — runs entirely in the container
 - `sandbox ollama run <model>` — runs entirely in the container
 - `sandbox claude-local <model>` — routes Claude Code's LLM calls to local Ollama instead of Anthropic
 
@@ -315,10 +315,10 @@ This is free but the model quality is lower. Good for exploration and learning, 
 | Architecture decision | `sandbox claude` (claude-sonnet) | ~$0.01–0.10 |
 | Complex refactor | `sandbox claude` | ~$0.05–0.50 |
 | Code review | `sandbox llm -m claude-3.5-sonnet` | ~$0.01–0.05 |
-| Commit message | `sandbox llm -m ollama/llama3.2` | Free |
-| Diff summary | `sandbox llm -m ollama/llama3.2` | Free |
-| Quick question | `sandbox llm -m ollama/llama3.2` | Free |
-| Log analysis | `sandbox llm -m ollama/codellama` | Free |
+| Commit message | `sandbox llm -m llama3.2` | Free |
+| Diff summary | `sandbox llm -m llama3.2` | Free |
+| Quick question | `sandbox llm -m llama3.2` | Free |
+| Log analysis | `sandbox llm -m codellama` | Free |
 
 These are rough estimates. Actual costs depend on context length and model pricing. Check [anthropic.com/pricing](https://anthropic.com/pricing) for current rates.
 
@@ -349,7 +349,7 @@ sandbox claude -p "do X"            # with a starting prompt
 sandbox run --headless -- "do X"           # non-interactive, logged
 
 # llm CLI (quick tasks)
-sandbox llm -m ollama/llama3.2 "question"  # local, free
+sandbox llm -m llama3.2 "question"  # local, free
 sandbox llm -m claude-3.5-sonnet "question" # API, quality
 
 # Local Ollama

@@ -122,14 +122,14 @@ If you added `python` and `llm` to your `sandbox.yaml`, you can send one-off pro
 
 ```bash
 # Prompt a local Ollama model
-sandbox llm -m ollama/qwen2.5-coder:7b "What does this function do?"
+sandbox llm -m qwen2.5-coder:7b "What does this function do?"
 
 # Pipe file contents in
-sandbox exec bash -c 'cat /workspace/main.py | llm -m ollama/qwen2.5-coder:7b "Review this code"'
+sandbox exec bash -c 'cat /workspace/main.py | llm -m qwen2.5-coder:7b "Review this code"'
 
 # Compare a local model against Claude (when you have an API key set up too)
 sandbox llm -m claude-3-5-sonnet "Explain this error"
-sandbox llm -m ollama/gemma3:12b "Explain this error"
+sandbox llm -m gemma3:12b "Explain this error"
 ```
 
 The `llm` CLI is useful for scripting and quick experiments — pipe in a file, get a response, pipe it somewhere else. It is not a replacement for `claude-local`, which gives you the full interactive Claude Code experience.
@@ -159,7 +159,7 @@ sandbox clean-models
 | Pull a model | `sandbox models pull qwen2.5-coder:7b` |
 | Launch Claude Code offline | `sandbox claude-local qwen2.5-coder:7b` |
 | List downloaded models | `sandbox models list` |
-| Quick prompt via llm CLI | `sandbox llm -m ollama/qwen2.5-coder:7b "..."` |
+| Quick prompt via llm CLI | `sandbox llm -m qwen2.5-coder:7b "..."` |
 | Run any Ollama command | `sandbox ollama <cmd>` |
 | Free up model disk space | `sandbox clean-models` |
 
