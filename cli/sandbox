@@ -440,6 +440,108 @@ cmd_run() {
     fi
 }
 
+# Shared docker args builder — sets global DOCKER_ARGS array
+_build_docker_args() {
+    local name="$1"
+    DOCKER_ARGS=(
+        "--name" "sandbox-${name}"
+        "--rm"
+        "--hostname" "sandbox"
+        "--security-opt" "no-new-privileges"
+        "--pids-limit" "256"
+    )
+
+    # Volumes
+    DOCKER_ARGS+=("-v" "sandbox-${name}-claude:/home/node/.claude")
+    DOCKER_ARGS+=("-v" "sandbox-${name}-home:/home/node/.persistent")
+    DOCKER_ARGS+=("-v" "sandbox-${name}-cache:/home/node/.cache")
+
+    # Ollama
+    local has_ollama=false
+    while IFS= read -r feature; do
+        [ "$feature" = "ollama" ] && has_ollama=true
+    done < <(config_get '.features[]')
+    if $has_ollama; then
+        DOCKER_ARGS+=("-v" "sandbox-ollama-models:/home/node/.ollama")
+    fi
+
+    # Mounts
+    local has_mounts=false
+    local mount_count
+    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
+        for i in $(seq 0 $((mount_count - 1))); do
+            has_mounts=true
+            local host_path container_path readonly_flag
+            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
+            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
+            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
+            host_path="${host_path/#\~/$HOME}"
+            if [[ "$host_path" == .* ]]; then
+                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
+            fi
+            local mount_spec="${host_path}:${container_path}"
+            if [ "$readonly_flag" = "true" ]; then
+                mount_spec="${mount_spec}:ro"
+            fi
+            DOCKER_ARGS+=("-v" "$mount_spec")
+        done
+    fi
+    if ! $has_mounts; then
+        DOCKER_ARGS+=("-v" "$(pwd):/workspace")
+    fi
+
+    # Env vars
+    local env_keys
+    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        case "$key" in
+            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
+            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
+            EDITOR|VISUAL|DOCKER_HOST|\
+            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
+            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
+                continue ;;
+        esac
+        local val
+        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
+        DOCKER_ARGS+=("-e" "${key}=${val}")
+    done <<< "$env_keys"
+
+    # Git config
+    local git_keys
+    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        case "$key" in
+            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff) ;;
+            *) continue ;;
+        esac
+        local val
+        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
+        local env_key
+        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
+        DOCKER_ARGS+=("-e" "SANDBOX_GIT_${env_key}=${val}")
+    done <<< "$git_keys"
+
+    # Firewall
+    local firewall
+    firewall=$(config_get_default '.firewall' 'strict')
+    DOCKER_ARGS+=("-e" "SANDBOX_FIREWALL=${firewall}")
+    if [ "$firewall" = "strict" ]; then
+        DOCKER_ARGS+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
+    fi
+
+    # Resource limits
+    local memory_limit
+    memory_limit=$(config_get '.resources.memory')
+    [ -n "$memory_limit" ] && DOCKER_ARGS+=("--memory" "$memory_limit")
+    local cpu_limit
+    cpu_limit=$(config_get '.resources.cpus')
+    [ -n "$cpu_limit" ] && DOCKER_ARGS+=("--cpus" "$cpu_limit")
+}
+
 cmd_remote() {
     find_config
     local name
@@ -470,102 +572,9 @@ cmd_remote() {
     log "Connect via claude.ai/code or the Claude mobile app"
     echo ""
 
-    local docker_args=(
-        "--name" "sandbox-${name}"
-        "--rm"
-        "--hostname" "sandbox"
-        "--security-opt" "no-new-privileges"
-        "--pids-limit" "256"
-    )
+    _build_docker_args "$name"
 
-    # Volumes
-    docker_args+=("-v" "sandbox-${name}-claude:/home/node/.claude")
-    docker_args+=("-v" "sandbox-${name}-home:/home/node/.persistent")
-    docker_args+=("-v" "sandbox-${name}-cache:/home/node/.cache")
-
-    # Ollama
-    local has_ollama=false
-    while IFS= read -r feature; do
-        [ "$feature" = "ollama" ] && has_ollama=true
-    done < <(config_get '.features[]')
-    if $has_ollama; then
-        docker_args+=("-v" "sandbox-ollama-models:/home/node/.ollama")
-    fi
-
-    # Mounts
-    local has_mounts=false
-    local mount_count
-    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
-    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
-        for i in $(seq 0 $((mount_count - 1))); do
-            has_mounts=true
-            local host_path container_path readonly_flag
-            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
-            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
-            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
-            host_path="${host_path/#\~/$HOME}"
-            if [[ "$host_path" == .* ]]; then
-                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
-            fi
-            local mount_spec="${host_path}:${container_path}"
-            if [ "$readonly_flag" = "true" ]; then
-                mount_spec="${mount_spec}:ro"
-            fi
-            docker_args+=("-v" "$mount_spec")
-        done
-    fi
-    if ! $has_mounts; then
-        docker_args+=("-v" "$(pwd):/workspace")
-    fi
-
-    # Env, git config, firewall (same as cmd_claude)
-    local env_keys
-    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        case "$key" in
-            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
-            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
-            EDITOR|VISUAL|DOCKER_HOST|\
-            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
-                continue ;;
-        esac
-        local val
-        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
-        docker_args+=("-e" "${key}=${val}")
-    done <<< "$env_keys"
-
-    local git_keys
-    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        case "$key" in
-            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff) ;;
-            *) continue ;;
-        esac
-        local val
-        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
-        local env_key
-        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
-        docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
-    done <<< "$git_keys"
-
-    local firewall
-    firewall=$(config_get_default '.firewall' 'strict')
-    docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
-    if [ "$firewall" = "strict" ]; then
-        docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
-    fi
-
-    local memory_limit
-    memory_limit=$(config_get '.resources.memory')
-    [ -n "$memory_limit" ] && docker_args+=("--memory" "$memory_limit")
-    local cpu_limit
-    cpu_limit=$(config_get '.resources.cpus')
-    [ -n "$cpu_limit" ] && docker_args+=("--cpus" "$cpu_limit")
-
-    docker run -it "${docker_args[@]}" \
+    docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
         claude remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
@@ -594,103 +603,7 @@ cmd_claude() {
     # Otherwise start a new container with Claude Code
     log "Starting Claude Code in sandbox-${name}..."
 
-    local docker_args=(
-        "--name" "sandbox-${name}"
-        "--rm"
-        "--hostname" "sandbox"
-        "--security-opt" "no-new-privileges"
-        "--pids-limit" "256"
-    )
-
-    # Volumes
-    docker_args+=("-v" "sandbox-${name}-claude:/home/node/.claude")
-    docker_args+=("-v" "sandbox-${name}-home:/home/node/.persistent")
-    docker_args+=("-v" "sandbox-${name}-cache:/home/node/.cache")
-
-    # Check for ollama feature
-    local has_ollama=false
-    while IFS= read -r feature; do
-        [ "$feature" = "ollama" ] && has_ollama=true
-    done < <(config_get '.features[]')
-    if $has_ollama; then
-        docker_args+=("-v" "sandbox-ollama-models:/home/node/.ollama")
-    fi
-
-    # Default workspace mount
-    local has_mounts=false
-    local mount_count
-    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
-    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
-        for i in $(seq 0 $((mount_count - 1))); do
-            has_mounts=true
-            local host_path container_path readonly_flag
-            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
-            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
-            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
-            host_path="${host_path/#\~/$HOME}"
-            if [[ "$host_path" == .* ]]; then
-                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
-            fi
-            local mount_spec="${host_path}:${container_path}"
-            if [ "$readonly_flag" = "true" ]; then
-                mount_spec="${mount_spec}:ro"
-            fi
-            docker_args+=("-v" "$mount_spec")
-        done
-    fi
-    if ! $has_mounts; then
-        docker_args+=("-v" "$(pwd):/workspace")
-    fi
-
-    # Env vars
-    local env_keys
-    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        case "$key" in
-            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
-            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
-            EDITOR|VISUAL|DOCKER_HOST|\
-            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
-                continue ;;
-        esac
-        local val
-        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
-        docker_args+=("-e" "${key}=${val}")
-    done <<< "$env_keys"
-
-    # Git config
-    local git_keys
-    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        case "$key" in
-            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff) ;;
-            *) continue ;;
-        esac
-        local val
-        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
-        local env_key
-        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
-        docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
-    done <<< "$git_keys"
-
-    # Firewall
-    local firewall
-    firewall=$(config_get_default '.firewall' 'strict')
-    docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
-    if [ "$firewall" = "strict" ]; then
-        docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
-    fi
-
-    # Resource limits
-    local memory_limit
-    memory_limit=$(config_get '.resources.memory')
-    [ -n "$memory_limit" ] && docker_args+=("--memory" "$memory_limit")
-    local cpu_limit
-    cpu_limit=$(config_get '.resources.cpus')
-    [ -n "$cpu_limit" ] && docker_args+=("--cpus" "$cpu_limit")
+    _build_docker_args "$name"
 
     # Skip permissions
     local skip_flag=""
@@ -698,14 +611,134 @@ cmd_claude() {
     skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
     if [ "$skip_permissions" = "true" ]; then
         skip_flag="--dangerously-skip-permissions"
+        local firewall
+        firewall=$(config_get_default '.firewall' 'strict')
         if [ "$firewall" != "strict" ]; then
             warn "WARNING: skip_permissions enabled without strict firewall!"
         fi
     fi
 
-    docker run -it "${docker_args[@]}" \
+    docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
         claude $skip_flag "$@"
+}
+
+cmd_claude_local() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    # Require a model name
+    if [ $# -eq 0 ]; then
+        error "Usage: sandbox claude-local <model> [claude-args...]"
+        error "Example: sandbox claude-local qwen3.5"
+        error "See available models: sandbox models list"
+        exit 1
+    fi
+    local model="$1"
+    shift
+
+    # Check ollama feature
+    local has_ollama=false
+    while IFS= read -r feature; do
+        [ "$feature" = "ollama" ] && has_ollama=true
+    done < <(config_get '.features[]')
+    if ! $has_ollama; then
+        error "The ollama feature is required for local models. Add 'ollama' to features in sandbox.yaml."
+        exit 1
+    fi
+
+    # Check if container is already running — exec into it
+    if docker container inspect "sandbox-${name}" &>/dev/null; then
+        log "Attaching to Claude Code (local: $model) in sandbox-${name}..."
+        docker exec -it \
+            -e ANTHROPIC_AUTH_TOKEN=ollama \
+            -e ANTHROPIC_API_KEY="" \
+            -e ANTHROPIC_BASE_URL=http://localhost:11434 \
+            "sandbox-${name}" claude --model "$model" "$@"
+        return
+    fi
+
+    log "Starting Claude Code with local model: $model"
+    _build_docker_args "$name"
+
+    # Add Ollama API env vars
+    DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=ollama")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_BASE_URL=http://localhost:11434")
+
+    docker run -it "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        claude --model "$model" "$@"
+}
+
+cmd_remote_local() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if ! docker image inspect "sandbox-${name}:latest" &>/dev/null; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    # Require a model name
+    if [ $# -eq 0 ]; then
+        error "Usage: sandbox remote-local <model> [--name <session>] [--spawn <mode>]"
+        error "Example: sandbox remote-local qwen3.5"
+        exit 1
+    fi
+    local model="$1"
+    shift
+
+    # Check ollama feature
+    local has_ollama=false
+    while IFS= read -r feature; do
+        [ "$feature" = "ollama" ] && has_ollama=true
+    done < <(config_get '.features[]')
+    if ! $has_ollama; then
+        error "The ollama feature is required for local models. Add 'ollama' to features in sandbox.yaml."
+        exit 1
+    fi
+
+    # Parse optional args
+    local session_name="${name}-local"
+    local spawn_mode="same-dir"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) session_name="$2"; shift 2 ;;
+            --spawn) spawn_mode="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    log "Starting Claude Code remote control with local model: $model"
+    log "Connect via claude.ai/code or the Claude mobile app"
+    echo ""
+
+    _build_docker_args "$name"
+
+    # Add Ollama API env vars
+    DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=ollama")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_BASE_URL=http://localhost:11434")
+
+    docker run -it "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        claude --model "$model" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_ollama() {
@@ -1061,6 +1094,8 @@ Commands:
   run [--headless]    Run the sandbox container
   claude              Launch Claude Code directly
   remote              Start Claude Code remote control server
+  claude-local <model>  Launch Claude Code with a local Ollama model
+  remote-local <model>  Remote control with a local Ollama model
   ollama <cmd>        Run Ollama commands in the sandbox
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
@@ -1086,6 +1121,8 @@ case "${1:-help}" in
     run)            cmd_run "$@" ;;
     claude)         shift; cmd_claude "$@" ;;
     remote)         cmd_remote "$@" ;;
+    claude-local)   shift; cmd_claude_local "$@" ;;
+    remote-local)   shift; cmd_remote_local "$@" ;;
     ollama)         cmd_ollama "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
