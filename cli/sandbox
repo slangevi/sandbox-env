@@ -632,10 +632,10 @@ cmd_remote_local() {
     _build_docker_args "$name"
     _read_claude_config
 
-    # Add Ollama API env vars
-    DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=ollama")
-    DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
-    DOCKER_ARGS+=("-e" "ANTHROPIC_BASE_URL=http://localhost:11434")
+    # Note: do NOT override ANTHROPIC_* auth here — remote control needs
+    # real Anthropic auth for session management. The --model flag tells
+    # Claude Code to use Ollama for inference while keeping Anthropic auth
+    # for the remote control protocol.
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
