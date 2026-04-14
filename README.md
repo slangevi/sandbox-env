@@ -9,29 +9,41 @@ A Docker sandbox for running Claude Code in isolated, per-project customizable c
 
 ## Quick Start
 
+### One-time setup
+
 ```bash
-# 1. Build the base image (once)
-./cli/sandbox build-base
+# Clone the sandbox-env repo
+git clone https://github.com/slangevi/sandbox-env.git ~/sandbox-env
 
-# 2. Go to your project directory
-cd ~/my-project
+# Build the base image (takes a few minutes the first time)
+~/sandbox-env/cli/sandbox build-base
 
-# 3. Generate a starter config
-~/path/to/sandbox-env/cli/sandbox init
-
-# 4. Edit sandbox.yaml — add features, packages, etc.
-
-# 5. Build your project image
-~/path/to/sandbox-env/cli/sandbox build
-
-# 6. Authenticate Claude Code for this project
-~/path/to/sandbox-env/cli/sandbox login
-
-# 7. Launch Claude Code
-~/path/to/sandbox-env/cli/sandbox claude
+# Optional: add an alias for convenience
+echo 'alias sandbox="~/sandbox-env/cli/sandbox"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-This launches Claude Code directly inside the sandbox. Your project files are mounted at `/workspace`.
+### Per-project setup
+
+```bash
+cd ~/my-code-project
+
+# Generate a sandbox config (creates sandbox.yaml)
+sandbox init
+
+# Edit sandbox.yaml — add features, packages, git config, etc.
+
+# Build your project image
+sandbox build
+
+# Authenticate Claude Code for this project (once)
+sandbox login
+
+# Launch Claude Code
+sandbox claude
+```
+
+Your project files are mounted at `/workspace` inside the container. Edits Claude makes are immediately visible on your host. The only file added to your project is `sandbox.yaml` — commit it for your team or add it to `.gitignore`.
 
 ## Configuration
 
