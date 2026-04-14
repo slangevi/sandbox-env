@@ -1,4 +1,5 @@
 .superpowers/
+docs/superpowers/
 *.tmp
 .DS_Store
-.claude/settings.local.json
+.claude/
