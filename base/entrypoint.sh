@@ -67,6 +67,12 @@ if [ -d "$PERSISTENT" ]; then
     # ~/.local for tools that store data/binaries here (pipx, etc.)
     mkdir -p "$PERSISTENT/local"
     chown node:node "$PERSISTENT/local"
+    # Merge: copy feature-installed local into persistent volume (without overwriting existing)
+    if [ -d /home/node/.local ] && [ ! -L /home/node/.local ] && [ -n "$(ls -A /home/node/.local 2>/dev/null)" ]; then
+        cp -rn /home/node/.local/. "$PERSISTENT/local/" 2>/dev/null || true
+    fi
+    # Remove the original (may be a directory from feature installs) and symlink
+    rm -rf /home/node/.local
     ln -sfn "$PERSISTENT/local" /home/node/.local
 
     # npm global prefix — persists globally installed packages (MCP servers, etc.)
