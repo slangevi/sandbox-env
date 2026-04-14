@@ -79,6 +79,21 @@ fi
 # Ensure volume ownership (volumes may be fresh, owned by root)
 if [ -d /home/node/.claude ]; then
     chown node:node /home/node/.claude
+
+    # Claude Code stores .claude.json in the home dir (not inside .claude/).
+    # With --rm containers, it gets lost each restart. Symlink it into the
+    # volume so it persists, and restore from backup if needed.
+    if [ ! -f /home/node/.claude/.claude.json ] && [ -d /home/node/.claude/backups ]; then
+        # Restore from most recent backup
+        local_backup=$(ls -t /home/node/.claude/backups/.claude.json.backup.* 2>/dev/null | head -1)
+        if [ -n "$local_backup" ]; then
+            cp "$local_backup" /home/node/.claude/.claude.json
+            chown node:node /home/node/.claude/.claude.json
+        fi
+    fi
+    # Symlink so Claude Code reads/writes through the volume
+    ln -sf /home/node/.claude/.claude.json /home/node/.claude.json
+    chown -h node:node /home/node/.claude.json
 fi
 if [ -d /home/node/.cache ]; then
     chown node:node /home/node/.cache
