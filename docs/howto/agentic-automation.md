@@ -11,7 +11,7 @@ Before you begin:
 - Docker is running (`docker info` returns without error)
 - The base sandbox image is built: `sandbox build-base`
 - The `sandbox` CLI is on your PATH (or use `cli/sandbox` from the repo root)
-- You have an Anthropic API key and have authenticated once with `sandbox auth` (see section 3)
+- You have an Anthropic API key and have authenticated once with `sandbox login` (see section 3)
 - On macOS, install GNU coreutils for timeout enforcement: `brew install coreutils`
 
 Verify your setup:
@@ -38,7 +38,7 @@ mounts:
 # Features to include in the image
 features:
   - python          # if your project is Python
-  # - node          # if your project is Node/TypeScript
+  # - node-extra    # if your project is Node/TypeScript
 
 # Extra system packages
 packages:
@@ -47,7 +47,7 @@ packages:
 
 # Environment variables passed into the container
 env:
-  PYTHONPATH: /workspace
+  PYTHONDONTWRITEBYTECODE: "1"
 
 # Firewall: strict is the default and is required for safe skip_permissions use.
 # Only traffic to explicitly listed domains (plus GitHub and api.anthropic.com)
@@ -113,7 +113,7 @@ sandbox build
 **Authenticate Claude Code** for this project. Each project gets its own isolated Docker volume for Claude credentials — this is a one-time step per project:
 
 ```bash
-sandbox auth
+sandbox login
 ```
 
 This opens an interactive container where you log in with your Anthropic account. Credentials are stored in the Docker volume `sandbox-<name>-claude` and are never written to your host filesystem.

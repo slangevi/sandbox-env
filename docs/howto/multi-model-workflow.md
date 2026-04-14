@@ -118,7 +118,7 @@ Opens a full Claude Code session. Your `/workspace` is mounted from the current 
 ### Pass a starting prompt
 
 ```bash
-sandbox claude --message "Refactor the authentication module to use JWT tokens instead of sessions. The current code is in src/auth/. Keep backward compatibility."
+sandbox claude -p "Refactor the authentication module to use JWT tokens instead of sessions. The current code is in src/auth/. Keep backward compatibility."
 ```
 
 ### Headless mode (non-interactive, scriptable)
@@ -284,7 +284,7 @@ echo "What is a monoid?" | sandbox ollama run llama3.2
 
 ### What costs money
 
-- `sandbox claude` and `sandbox claude-local` calls routed to Anthropic's API
+- `sandbox claude` calls routed to Anthropic's API
 - `sandbox llm -m claude-*` calls
 - `sandbox llm` with no `-m` flag if the default model is an API model
 - `sandbox run --headless` uses Claude Code, which calls the API
@@ -342,7 +342,7 @@ sandbox models pull llama3.2               # once, shared across projects
 
 # Claude Code (API, full power)
 sandbox claude                              # interactive session
-sandbox claude --message "do X"            # with a starting prompt
+sandbox claude -p "do X"            # with a starting prompt
 sandbox run --headless -- "do X"           # non-interactive, logged
 
 # llm CLI (quick tasks)
