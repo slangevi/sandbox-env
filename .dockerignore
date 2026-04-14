@@ -1,0 +1,11 @@
+.git
+.github
+.superpowers
+.claude
+.DS_Store
+tests
+docs
+LICENSE
+README.md
+.gitignore
+.dockerignore
