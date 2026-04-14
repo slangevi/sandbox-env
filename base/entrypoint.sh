@@ -12,7 +12,10 @@ fi
 # Start Ollama if installed and the marker file exists
 if [ -f /etc/sandbox/services/ollama ]; then
     echo "Starting Ollama server..."
-    OLLAMA_MODELS=/home/node/.ollama/models ollama serve &>/tmp/ollama.log &
+    # Set Ollama models path — server starts as root so ~ is /root,
+    # but models volume is mounted at /home/node/.ollama
+    export OLLAMA_MODELS=/home/node/.ollama/models
+    ollama serve &>/tmp/ollama.log &
     for i in $(seq 1 10); do
         if curl -sf http://localhost:11434/api/tags &>/dev/null; then
             echo "Ollama ready."
