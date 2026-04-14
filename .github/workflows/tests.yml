@@ -1,0 +1,56 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Syntax check CLI
+        run: bash -n cli/sandbox
+
+      - name: Build base image
+        run: cli/sandbox build-base
+
+      - name: Test base image
+        run: tests/test-base.sh
+
+      - name: Test CLI commands
+        run: tests/test-cli.sh
+
+      - name: Test CLI error handling
+        run: tests/test-cli-errors.sh
+
+      - name: Test run modes
+        run: tests/test-run-modes.sh
+
+      - name: Test volumes
+        run: tests/test-volumes.sh
+
+      - name: Test git config
+        run: tests/test-git-config.sh
+
+      - name: Test headless mode
+        run: tests/test-headless.sh
+
+      - name: Test convenience commands
+        run: tests/test-commands.sh
+
+      - name: Test YAML validation
+        run: tests/test-yaml-validation.sh
+
+      - name: Test integration (python + llm)
+        run: tests/test-integration.sh
