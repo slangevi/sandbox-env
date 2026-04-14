@@ -76,7 +76,10 @@ export PATH="$PERSISTENT/npm-global/bin:\$PATH"
 PROFILE
 fi
 
-# Ensure cache dir ownership (volume may be fresh)
+# Ensure volume ownership (volumes may be fresh, owned by root)
+if [ -d /home/node/.claude ]; then
+    chown node:node /home/node/.claude
+fi
 if [ -d /home/node/.cache ]; then
     chown node:node /home/node/.cache
 fi
