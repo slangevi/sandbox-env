@@ -38,6 +38,13 @@ find_config() {
         error "No sandbox.yaml found in current directory."
         exit 1
     fi
+
+    # Validate YAML is parseable
+    if ! yq '.' "$CONFIG_FILE" >/dev/null 2>&1; then
+        error "Invalid YAML in $CONFIG_FILE. Check indentation and syntax."
+        error "Run: yq '.' $CONFIG_FILE"
+        exit 1
+    fi
 }
 
 config_get() {
