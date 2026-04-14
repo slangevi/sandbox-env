@@ -92,6 +92,7 @@ while IFS='=' read -r var val; do
     local_key="${var#SANDBOX_GIT_}"
     local_key=$(echo "$local_key" | tr '[:upper:]' '[:lower:]' | sed 's/__/./g')
     # Whitelist safe keys — defense in depth (CLI also whitelists)
+    # Keys are lowercased by the tr above, so match lowercase here
     case "$local_key" in
         user.name|user.email|init.defaultbranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff)
             gosu node git config --global "$local_key" "$val"

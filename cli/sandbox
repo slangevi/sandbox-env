@@ -218,7 +218,6 @@ cmd_run() {
     local passthrough_args=()
     local parsing_passthrough=false
 
-    shift # remove 'run' from args
     while [ $# -gt 0 ]; do
         if [ "$1" = "--" ]; then
             parsing_passthrough=true
@@ -235,31 +234,7 @@ cmd_run() {
 
     # Build common docker args
     _build_docker_args "$name"
-
-    # Claude Code permissions
-    local skip_permissions
-    skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
-    if [ "$skip_permissions" = "true" ]; then
-        local firewall
-        firewall=$(config_get_default '.firewall' 'strict')
-        if [ "$firewall" != "strict" ]; then
-            warn "WARNING: skip_permissions is enabled without strict firewall!"
-            warn "This is dangerous — Claude can access any network resource."
-            warn "Set 'firewall: strict' in sandbox.yaml for safety."
-        fi
-    fi
-
-    local skip_permissions_flag=""
-    if [ "$skip_permissions" = "true" ]; then
-        skip_permissions_flag="--dangerously-skip-permissions"
-    fi
-
-    # Read claude.args from config
-    local claude_extra_args=()
-    while IFS= read -r arg; do
-        [ -z "$arg" ] && continue
-        claude_extra_args+=("$arg")
-    done < <(config_get '.claude.args[]')
+    _read_claude_config
 
     # Run
     if [ "$mode" = "headless" ]; then
@@ -294,7 +269,7 @@ cmd_run() {
 
         $timeout_cmd docker run "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest" \
-            claude $skip_permissions_flag "${claude_extra_args[@]}" -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+            claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${DOCKER_ARGS[@]}" \
@@ -304,6 +279,35 @@ cmd_run() {
         log "Running sandbox-${name} interactively..."
         docker run -it "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest"
+    fi
+}
+
+# Shared Claude config reader — sets CLAUDE_EXTRA_ARGS array and SKIP_PERMISSIONS_FLAG string
+_read_claude_config() {
+    CLAUDE_EXTRA_ARGS=()
+    while IFS= read -r arg; do
+        [ -z "$arg" ] && continue
+        case "$arg" in
+            --dangerously-skip-permissions|--no-sandbox)
+                warn "Blocked dangerous claude.args value: '$arg' — use claude.skip_permissions instead"
+                continue
+                ;;
+        esac
+        CLAUDE_EXTRA_ARGS+=("$arg")
+    done < <(config_get '.claude.args[]')
+
+    SKIP_PERMISSIONS_FLAG=""
+    local skip_permissions
+    skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
+    if [ "$skip_permissions" = "true" ]; then
+        SKIP_PERMISSIONS_FLAG="--dangerously-skip-permissions"
+        local firewall
+        firewall=$(config_get_default '.firewall' 'strict')
+        if [ "$firewall" != "strict" ]; then
+            warn "WARNING: skip_permissions is enabled without strict firewall!"
+            warn "This is dangerous — Claude can access any network resource."
+            warn "Set 'firewall: strict' in sandbox.yaml for safety."
+        fi
     fi
 }
 
@@ -368,7 +372,7 @@ _build_docker_args() {
             NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
             EDITOR|VISUAL|DOCKER_HOST|\
             http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
+            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*|ANTHROPIC_*)
                 warn "Skipping dangerous env var '$key'"
                 continue ;;
         esac
@@ -470,10 +474,11 @@ cmd_remote() {
     echo ""
 
     _build_docker_args "$name"
+    _read_claude_config
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_claude() {
@@ -501,30 +506,11 @@ cmd_claude() {
     log "Starting Claude Code in sandbox-${name}..."
 
     _build_docker_args "$name"
-
-    # Skip permissions
-    local skip_flag=""
-    local skip_permissions
-    skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
-    if [ "$skip_permissions" = "true" ]; then
-        skip_flag="--dangerously-skip-permissions"
-        local firewall
-        firewall=$(config_get_default '.firewall' 'strict')
-        if [ "$firewall" != "strict" ]; then
-            warn "WARNING: skip_permissions enabled without strict firewall!"
-        fi
-    fi
-
-    # Read claude.args from config
-    local claude_extra_args=()
-    while IFS= read -r arg; do
-        [ -z "$arg" ] && continue
-        claude_extra_args+=("$arg")
-    done < <(config_get '.claude.args[]')
+    _read_claude_config
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude $skip_flag "${claude_extra_args[@]}" "$@"
+        claude $SKIP_PERMISSIONS_FLAG "${CLAUDE_EXTRA_ARGS[@]}" "$@"
 }
 
 cmd_claude_local() {
@@ -575,6 +561,7 @@ cmd_claude_local() {
 
     log "Starting Claude Code with local model: $model"
     _build_docker_args "$name"
+    _read_claude_config
 
     # Add Ollama API env vars
     DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=ollama")
@@ -583,7 +570,7 @@ cmd_claude_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" "$@"
+        claude --model "$model" "${CLAUDE_EXTRA_ARGS[@]}" "$@"
 }
 
 cmd_remote_local() {
@@ -632,10 +619,11 @@ cmd_remote_local() {
     done
 
     log "Starting Claude Code remote control with local model: $model"
-    log "Connect via claude.ai/code or the Claude mobile app"
+    log "Connect via claude.ai/code — LLM calls route to local Ollama model"
     echo ""
 
     _build_docker_args "$name"
+    _read_claude_config
 
     # Add Ollama API env vars
     DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=ollama")
@@ -644,7 +632,7 @@ cmd_remote_local() {
 
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude --model "$model" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+        claude --model "$model" "${CLAUDE_EXTRA_ARGS[@]}" remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
 cmd_ollama() {
@@ -976,12 +964,9 @@ firewall: strict
 
 claude:
   mode: interactive
-  args: []
-# claude:
-#   mode: interactive
-#   skip_permissions: false   # auto-adds --dangerously-skip-permissions
-#   timeout: 30m              # headless mode timeout
-#   args: []
+  # skip_permissions: false
+  # timeout: 30m
+  # args: []
 
 # resources:
 #   memory: 4g
@@ -1026,7 +1011,7 @@ USAGE
 case "${1:-help}" in
     build-base)     cmd_build_base ;;
     build)          shift; cmd_build "$@" ;;
-    run)            cmd_run "$@" ;;
+    run)            shift; cmd_run "$@" ;;
     claude)         shift; cmd_claude "$@" ;;
     remote)         shift; cmd_remote "$@" ;;
     claude-local)   shift; cmd_claude_local "$@" ;;
