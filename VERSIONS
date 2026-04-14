@@ -8,7 +8,7 @@
 node=20.19-slim                   # base/Dockerfile (FROM)
 
 # Base tools (Dockerfile)
-claude-code=latest                # base/Dockerfile — TODO: pin when stable release cadence exists
+claude-code=2.1.104               # base/Dockerfile — pinned due to paste regression in 2.1.105+ (anthropics/claude-code#47699)
 git-delta=0.18.2                  # base/Dockerfile
 gosu=1.17                         # base/Dockerfile
 gh=apt-managed                    # base/Dockerfile — version managed by GitHub's apt repo
