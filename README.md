@@ -4,8 +4,22 @@ A Docker sandbox for running Claude Code in isolated, per-project customizable c
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/)
-- [yq](https://github.com/mikefarah/yq) (YAML processor) — `brew install yq`
+**macOS:**
+```bash
+brew install --cask docker   # or install Docker Desktop from docker.com
+brew install yq
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+# Docker
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER  # then log out and back in
+
+# yq
+sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_$(dpkg --print-architecture)
+sudo chmod +x /usr/local/bin/yq
+```
 
 ## Quick Start
 
