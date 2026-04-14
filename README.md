@@ -460,3 +460,14 @@ tests/test-firewall.sh
 # Full end-to-end test
 tests/test-integration.sh
 ```
+
+## HOWTOs
+
+Step-by-step guides for common use cases:
+
+- [Python Development](docs/howto/python-development.md) — Set up a sandbox for Python projects with pip, venv, testing, and linting
+- [Local LLM Coding](docs/howto/local-llm-coding.md) — Use Ollama models to power Claude Code fully offline, no API key needed
+- [Agentic Automation](docs/howto/agentic-automation.md) — Run Claude Code autonomously with strict firewall, timeouts, and resource limits
+- [Multi-Model Workflow](docs/howto/multi-model-workflow.md) — Combine Claude API for complex tasks with free local models for quick work
+- [Full-Stack Web Development](docs/howto/fullstack-web-development.md) — Python + Node.js sandbox with databases and custom setup
+- [Remote Pair Programming](docs/howto/remote-pair-programming.md) — Control Claude Code from any browser or phone via remote control
