@@ -159,9 +159,25 @@ sandbox clean-models        Remove shared Ollama models volume
 sandbox init                Generate a starter sandbox.yaml
 ```
 
+### Running Claude Code
+
+```bash
+# Interactive session — drops into a shell with claude available
+sandbox run
+
+# One-off prompt
+sandbox run -- claude -p "Refactor the auth module"
+
+# In a running container
+sandbox exec claude -p "Explain this codebase"
+
+# Start Claude Code interactively inside the container
+sandbox exec claude
+```
+
 ### Headless mode
 
-Run Claude Code non-interactively:
+Run Claude Code non-interactively with output capture:
 
 ```bash
 sandbox run --headless -- "Refactor the auth module to use JWT"
