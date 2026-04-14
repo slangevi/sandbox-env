@@ -27,11 +27,11 @@ cd ~/my-project
 # 6. Authenticate Claude Code for this project
 ~/path/to/sandbox-env/cli/sandbox login
 
-# 7. Run it
-~/path/to/sandbox-env/cli/sandbox run
+# 7. Launch Claude Code
+~/path/to/sandbox-env/cli/sandbox claude
 ```
 
-You'll land in a zsh shell inside the container with Claude Code available. Your project files are mounted at `/workspace`.
+This launches Claude Code directly inside the sandbox. Your project files are mounted at `/workspace`.
 
 ## Configuration
 
@@ -145,7 +145,7 @@ Drop a script in `features/`. It must:
 
 ```
 sandbox build-base          Build the base image (once, or to update)
-sandbox build               Build project image from sandbox.yaml
+sandbox build [--no-cache]  Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
 sandbox claude              Launch Claude Code (Anthropic API)
 sandbox claude-local <model> Launch Claude Code with a local Ollama model
@@ -274,9 +274,7 @@ Globally installed npm packages (including MCP servers installed via `npm instal
 
 Two modes controlled by the `firewall` field in `sandbox.yaml`:
 
-**`strict`** (default) — Default-deny iptables policy.
-
-**`open`** — No network restrictions. Use when you need unrestricted access (e.g., installing packages from arbitrary sources). Set `firewall: open` in your sandbox.yaml. Only whitelisted domains are reachable:
+**`strict`** (default) — Default-deny iptables policy. Only whitelisted domains are reachable:
 - Claude API, npm, GitHub, GitLab (always allowed)
 - Feature-specific domains (e.g., PyPI when `python` is installed)
 - Custom domains via `allowed_domains` in your config
@@ -288,7 +286,7 @@ allowed_domains:
   - internal.mycompany.com
 ```
 
-Strict mode is recommended when running with `--dangerously-skip-permissions`.
+**`open`** — No network restrictions. Use when you need unrestricted access (e.g., installing packages from arbitrary sources). Set `firewall: open` in your sandbox.yaml.
 
 ### Security hardening
 
