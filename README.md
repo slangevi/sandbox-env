@@ -147,8 +147,10 @@ Drop a script in `features/`. It must:
 sandbox build-base          Build the base image (once, or to update)
 sandbox build               Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
-sandbox claude              Launch Claude Code directly
-sandbox remote              Start Claude Code remote control server
+sandbox claude              Launch Claude Code (Anthropic API)
+sandbox claude-local <model> Launch Claude Code with a local Ollama model
+sandbox remote              Remote control via claude.ai/code (Anthropic API)
+sandbox remote-local <model> Remote control with a local Ollama model
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox login               Authenticate Claude Code for this project
 sandbox exec <cmd>          Run a command in a running container
@@ -174,6 +176,23 @@ sandbox claude -p "Refactor the auth module"
 # If a sandbox is already running, attaches to it
 # If not, starts a new container with Claude Code
 ```
+
+### Local models (Ollama-powered Claude Code)
+
+Run Claude Code using a local Ollama model instead of the Anthropic API — fully offline, no API key needed:
+
+```bash
+# Pull a model first
+sandbox models pull qwen3.5
+
+# Launch Claude Code with the local model
+sandbox claude-local qwen3.5
+
+# Or with remote control
+sandbox remote-local qwen3.5
+```
+
+This uses Ollama's Anthropic-compatible API. The `ollama` feature must be in your `sandbox.yaml`. Models need at least 64k context — see [recommended models](https://ollama.com/search?c=cloud).
 
 ### Remote control
 
