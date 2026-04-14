@@ -43,5 +43,5 @@ npm-check-updates=17              # features/node-extra.sh (major version pin)
 
 # pip packages (features/llm.sh)
 llm=0.24                          # features/llm.sh
-llm-claude-3=0.19                 # features/llm.sh
-llm-ollama=0.9.1                  # features/llm.sh
+llm-anthropic=0.24                # features/llm.sh (formerly llm-claude-3)
+llm-ollama=0.15.1                 # features/llm.sh

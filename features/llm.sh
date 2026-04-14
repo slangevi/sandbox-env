@@ -17,11 +17,10 @@ if ! command -v pipx &>/dev/null; then
 fi
 
 # Install llm via pipx (as node user for correct PATH) — pinned versions
+# Note: llm-claude-3 was renamed to llm-anthropic upstream
 su - node -c "pipx install llm==0.24"
-
-# Install plugins — pinned versions
-su - node -c "pipx inject llm llm-claude-3==0.19"
-su - node -c "pipx inject llm llm-ollama==0.9.1"
+su - node -c "pipx inject llm llm-anthropic==0.24"
+su - node -c "pipx inject llm llm-ollama==0.15.1"
 
 # No additional firewall domains — uses python's pypi.org (already in python.conf)
 
