@@ -654,6 +654,24 @@ cmd_ollama() {
     exit 1
 }
 
+cmd_llm() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
+        docker exec -it "sandbox-${name}" -- bash -lc "llm $*"
+        return
+    fi
+
+    error "No running sandbox. Start one first with 'sandbox run' or 'sandbox claude', then use 'sandbox llm' to interact."
+    exit 1
+}
+
 cmd_shell() {
     find_config
     local name
@@ -990,6 +1008,7 @@ Commands:
   claude-local <model>  Launch Claude Code with a local Ollama model
   remote-local <model>  Remote control with a local Ollama model
   ollama <cmd>        Run Ollama commands in the sandbox
+  llm [args]          Run the llm CLI in the sandbox
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
   shell               Open a shell in the running sandbox
@@ -1017,6 +1036,7 @@ case "${1:-help}" in
     claude-local)   shift; cmd_claude_local "$@" ;;
     remote-local)   shift; cmd_remote_local "$@" ;;
     ollama)         shift; cmd_ollama "$@" ;;
+    llm)            shift; cmd_llm "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
     shell)          cmd_shell ;;

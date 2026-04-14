@@ -178,6 +178,7 @@ sandbox claude-local <model> Launch Claude Code with a local Ollama model
 sandbox remote              Remote control via claude.ai/code (Anthropic API)
 sandbox remote-local <model> Remote control with a local Ollama model
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
+sandbox llm [args]          Run the llm CLI in the sandbox
 sandbox login               Authenticate Claude Code for this project
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
@@ -389,25 +390,20 @@ features:
 
 Run prompts from outside the container:
 
+With a running sandbox (`sandbox run` or `sandbox claude`):
+
 ```bash
 # One-off prompt
-sandbox run -- llm "Summarize this code"
+sandbox llm "Summarize this code"
 
 # With a specific model
-sandbox run -- llm -m claude-3.5-sonnet "Explain this error"
+sandbox llm -m claude-3.5-sonnet "Explain this error"
 
 # Using local Ollama models
-sandbox run -- llm -m ollama/llama3.2 "What does this function do?"
+sandbox llm -m ollama/llama3.2 "What does this function do?"
 
-# Pipe input
-sandbox run -- bash -c 'cat /workspace/main.py | llm "Review this code"'
-```
-
-Or in a running container:
-
-```bash
-sandbox exec llm "Your prompt"
-sandbox exec llm -m ollama/llama3.2 "Your prompt"
+# Pipe input (via sandbox exec for stdin support)
+sandbox exec bash -c 'cat /workspace/main.py | llm "Review this code"'
 ```
 
 ## Testing
