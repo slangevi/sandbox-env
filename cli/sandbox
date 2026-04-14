@@ -697,6 +697,57 @@ cmd_llm() {
         bash -lc 'llm "$@"' _ "$@"
 }
 
+cmd_start() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    # Check if already running
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
+        log "sandbox-${name} is already running."
+        return 0
+    fi
+
+    # Clean up any stopped container with the same name
+    docker rm "sandbox-${name}" 2>/dev/null || true
+
+    log "Starting sandbox-${name} in background..."
+    _build_docker_args "$name"
+
+    # Remove --rm so container persists, run detached with sleep infinity
+    local start_args=()
+    for arg in "${DOCKER_ARGS[@]}"; do
+        [ "$arg" = "--rm" ] && continue
+        start_args+=("$arg")
+    done
+
+    docker run -d "${start_args[@]}" \
+        "sandbox-${name}:latest" \
+        sleep infinity >/dev/null
+
+    # Wait for container to be ready
+    for i in $(seq 1 10); do
+        if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
+            log "sandbox-${name} is running. Use 'sandbox claude', 'sandbox llm', 'sandbox shell', etc."
+            log "Stop with: sandbox stop"
+            return 0
+        fi
+        sleep 1
+    done
+
+    error "Container failed to start. Check: docker logs sandbox-${name}"
+    exit 1
+}
+
 cmd_shell() {
     find_config
     local name
@@ -719,6 +770,7 @@ cmd_stop() {
     fi
     log "Stopping sandbox-${name}..."
     docker stop "sandbox-${name}" 2>/dev/null || true
+    docker rm "sandbox-${name}" 2>/dev/null || true
     log "Stopped."
 }
 
@@ -1036,6 +1088,7 @@ Commands:
   llm [args]          Run the llm CLI in the sandbox
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
+  start               Start the sandbox in the background
   shell               Open a shell in the running sandbox
   stop                Stop the running sandbox
   status              Show running sandbox containers
@@ -1064,6 +1117,7 @@ case "${1:-help}" in
     llm)            shift; cmd_llm "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
+    start)          cmd_start ;;
     shell)          cmd_shell ;;
     stop)           cmd_stop ;;
     status)         cmd_status ;;

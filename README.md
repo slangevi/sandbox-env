@@ -180,6 +180,7 @@ sandbox remote-local <model> Remote control with a local Ollama model
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox llm [args]          Run the llm CLI in the sandbox
 sandbox login               Authenticate Claude Code for this project
+sandbox start               Start the sandbox in the background
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
 sandbox stop                Stop the running container
@@ -189,6 +190,19 @@ sandbox models <cmd>        Manage Ollama models (pull, list, rm)
 sandbox clean               Remove project image and all project volumes
 sandbox clean-models        Remove shared Ollama models volume
 sandbox init                Generate a starter sandbox.yaml
+```
+
+### Background mode
+
+Start the sandbox once, then run commands instantly without container startup overhead:
+
+```bash
+sandbox start                        # starts in background
+sandbox llm "Summarize this code"    # fast — exec into running container
+sandbox llm "Explain this error"     # fast again
+sandbox claude                       # launch Claude Code in the same container
+sandbox shell                        # open a shell
+sandbox stop                         # when done
 ```
 
 ### Running Claude Code
