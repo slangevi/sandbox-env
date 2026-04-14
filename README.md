@@ -148,6 +148,7 @@ sandbox build-base          Build the base image (once, or to update)
 sandbox build               Build project image from sandbox.yaml
 sandbox run [--headless]    Run the container (interactive or headless)
 sandbox claude              Launch Claude Code directly
+sandbox remote              Start Claude Code remote control server
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox login               Authenticate Claude Code for this project
 sandbox exec <cmd>          Run a command in a running container
@@ -173,6 +174,25 @@ sandbox claude -p "Refactor the auth module"
 # If a sandbox is already running, attaches to it
 # If not, starts a new container with Claude Code
 ```
+
+### Remote control
+
+Control Claude Code inside the sandbox from any browser or the Claude mobile app:
+
+```bash
+sandbox remote
+```
+
+This starts Claude Code in remote control server mode. It displays a session URL — open it at [claude.ai/code](https://claude.ai/code) or scan the QR code with the Claude app. No ports are exposed; all communication goes through the Anthropic API over outbound HTTPS.
+
+Options:
+
+```bash
+sandbox remote --name "My Project"     # Custom session name
+sandbox remote --spawn worktree        # Each connection gets its own git worktree
+```
+
+Works with strict firewall since it only needs outbound HTTPS to `api.anthropic.com` (already whitelisted).
 
 ### Headless mode
 
