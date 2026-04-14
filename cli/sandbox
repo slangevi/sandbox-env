@@ -903,7 +903,11 @@ cmd_exec() {
         exit 1
     fi
 
-    docker exec -it "sandbox-${name}" "$@"
+    local tty_flag=""
+    if [ -t 0 ]; then
+        tty_flag="-it"
+    fi
+    docker exec $tty_flag "sandbox-${name}" "$@"
 }
 
 cmd_models() {

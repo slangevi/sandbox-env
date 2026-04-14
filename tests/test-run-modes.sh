@@ -59,17 +59,23 @@ check_output "workspace dir exists" "workspace" docker run --rm --user root "$IM
 # Test: hostname defaults to container id (not "sandbox" without --hostname flag)
 check_output "hostname settable" "sandbox" docker run --rm --user root --hostname sandbox "$IMAGE" hostname
 
-# Test: exec command (need a running container)
-# Start container in background
+# Test: start, exec, status, stop — through the CLI
 cd "$FIXTURES"
-docker run -d --name sandbox-test-project --rm --user root "$IMAGE" sleep 30 &>/dev/null
-sleep 2
-check_output "exec in running container" "root" docker exec sandbox-test-project whoami
-docker stop sandbox-test-project &>/dev/null 2>&1 || true
-sleep 2  # wait for --rm cleanup
+check "start launches background container" "$SANDBOX" start
+check_output "exec via CLI" "sandbox" "$SANDBOX" exec hostname
+check_output "status shows running container" "sandbox-test-project" "$SANDBOX" status
+check "start is idempotent" "$SANDBOX" start
+check "stop via CLI" "$SANDBOX" stop
 
-# Test: status command works (just verify it runs without error)
-check "status command runs" "$SANDBOX" status
+# Verify container is gone after stop
+sleep 1
+if docker container inspect sandbox-test-project &>/dev/null 2>&1; then
+    echo "  FAIL: container still exists after stop"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: container removed after stop"
+    PASS=$((PASS + 1))
+fi
 
 # Test: readonly mount
 TEST_TMPDIR=$(mktemp -d)
