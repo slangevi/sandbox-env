@@ -651,14 +651,22 @@ cmd_ollama() {
         exit 1
     fi
 
-    # Check if container is already running — exec into it
+    # If container is running, exec into it
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
-        docker exec -it "sandbox-${name}" ollama "${@:-run}"
+        docker exec -it "sandbox-${name}" -- ollama "${@:-run}"
         return
     fi
 
-    error "No running sandbox. Start one first with 'sandbox run' or 'sandbox claude', then use 'sandbox ollama' to interact."
-    exit 1
+    # Otherwise start a new container and run ollama
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _build_docker_args "$name"
+    docker run -it "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        ollama "${@:-run}"
 }
 
 cmd_llm() {
