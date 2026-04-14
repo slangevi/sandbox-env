@@ -242,21 +242,32 @@ Works with strict firewall since it only needs outbound HTTPS to `api.anthropic.
 
 ### Headless mode
 
-Run Claude Code non-interactively with output capture:
+Run Claude Code non-interactively with a prompt. Output is captured to a log file:
 
 ```bash
+# Pass the prompt after --
 sandbox run --headless -- "Refactor the auth module to use JWT"
-```
 
-Output is automatically saved to `~/.sandbox/logs/<name>/`. View it with:
-
-```bash
+# View the output
 sandbox logs
 ```
 
+You can also set `mode: headless` in `sandbox.yaml` so you don't need the `--headless` flag, but you still pass the prompt after `--`:
+
+```yaml
+claude:
+  mode: headless
+```
+
+```bash
+sandbox run -- "Fix the failing tests"
+```
+
+Output is saved to `~/.sandbox/logs/<name>/` with timestamps.
+
 ### Autonomous mode
 
-For fully unattended operation with `--dangerously-skip-permissions`, use strict firewall + skip_permissions together:
+For fully unattended operation, combine headless mode with `skip_permissions` and a timeout:
 
 ```yaml
 firewall: strict
@@ -270,7 +281,11 @@ resources:
   cpus: 2
 ```
 
-This auto-adds `--dangerously-skip-permissions` to Claude Code while the strict firewall constrains network access. The sandbox warns if you enable skip_permissions without a strict firewall.
+```bash
+sandbox run -- "Refactor the auth module to use JWT"
+```
+
+This auto-adds `--dangerously-skip-permissions` to Claude Code while the strict firewall constrains network access. The timeout kills the run after 30 minutes. The sandbox warns if you enable skip_permissions without a strict firewall.
 
 ## Authentication
 
