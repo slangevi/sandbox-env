@@ -233,141 +233,15 @@ cmd_run() {
         shift
     done
 
-    # Build docker run args
-    local docker_args=(
-        "--name" "sandbox-${name}"
-        "--rm"
-        "--hostname" "sandbox"
-        "--security-opt" "no-new-privileges"
-        "--pids-limit" "256"
-    )
-
-    # ── Persistent volumes ──────────────────────────────────────────
-    # Per-project: auth, home dotfiles, package caches
-    docker_args+=("-v" "sandbox-${name}-claude:/home/node/.claude")
-    docker_args+=("-v" "sandbox-${name}-home:/home/node/.persistent")
-    docker_args+=("-v" "sandbox-${name}-cache:/home/node/.cache")
-
-    # Shared: Ollama models (only if ollama feature is in config)
-    local has_ollama=false
-    while IFS= read -r feature; do
-        [ "$feature" = "ollama" ] && has_ollama=true
-    done < <(config_get '.features[]')
-    if $has_ollama; then
-        docker_args+=("-v" "sandbox-ollama-models:/home/node/.ollama")
-    fi
-
-    # Mounts from config
-    local has_mounts=false
-    local mount_count
-    mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
-    if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
-        for i in $(seq 0 $((mount_count - 1))); do
-            has_mounts=true
-            local host_path container_path readonly_flag
-            host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
-            container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
-            readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
-
-            # Expand ~ in host path
-            host_path="${host_path/#\~/$HOME}"
-            # Resolve relative paths (relative to config file location)
-            if [[ "$host_path" == .* ]]; then
-                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
-            fi
-
-            local mount_spec="${host_path}:${container_path}"
-            if [ "$readonly_flag" = "true" ]; then
-                mount_spec="${mount_spec}:ro"
-            fi
-            docker_args+=("-v" "$mount_spec")
-        done
-    fi
-
-    # Default mount if none specified
-    if ! $has_mounts; then
-        docker_args+=("-v" "$(pwd):/workspace")
-    fi
-
-    # Environment variables from config
-    local env_keys
-    env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        # Block dangerous env var overrides
-        case "$key" in
-            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
-            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
-            EDITOR|VISUAL|DOCKER_HOST|\
-            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
-                warn "Skipping dangerous env var '$key'"
-                continue
-                ;;
-        esac
-        local val
-        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
-        docker_args+=("-e" "${key}=${val}")
-    done <<< "$env_keys"
-
-    # Git config from sandbox.yaml (passed as SANDBOX_GIT_* env vars)
-    # Only allow safe git config keys — some keys allow arbitrary command execution
-    local git_keys
-    git_keys=$(yq -r '.git // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        # Whitelist safe git config keys
-        case "$key" in
-            user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff)
-                ;;
-            core.fsmonitor|core.sshCommand|core.hooksPath|core.pager|diff.*.textconv|filter.*.clean|filter.*.smudge)
-                warn "Blocked dangerous git config key '$key' — this key allows command execution"
-                continue
-                ;;
-            *)
-                warn "Blocked unknown git config key '$key' — only whitelisted keys are allowed"
-                continue
-                ;;
-        esac
-        local val
-        val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
-        local env_key
-        env_key=$(echo "$key" | tr '[:lower:]' '[:upper:]' | sed 's/\./__/g')
-        docker_args+=("-e" "SANDBOX_GIT_${env_key}=${val}")
-    done <<< "$git_keys"
-
-    # Firewall mode
-    local firewall
-    firewall=$(config_get_default '.firewall' 'strict')
-    docker_args+=("-e" "SANDBOX_FIREWALL=${firewall}")
-
-    if [ "$firewall" = "strict" ]; then
-        docker_args+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
-
-        # Pass allowed_domains as comma-separated env var
-        local domains=""
-        local domain_count
-        domain_count=$(yq '.allowed_domains | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
-        if [ "$domain_count" != "null" ] && [ "$domain_count" -gt 0 ] 2>/dev/null; then
-            for i in $(seq 0 $((domain_count - 1))); do
-                local domain
-                domain=$(yq -r ".allowed_domains[$i]" "$CONFIG_FILE")
-                if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
-                    error "Invalid domain '$domain'. Must be a valid domain name."
-                    exit 1
-                fi
-                domains="${domains:+${domains},}${domain}"
-            done
-        fi
-        if [ -n "$domains" ]; then
-            docker_args+=("-e" "SANDBOX_ALLOWED_DOMAINS=${domains}")
-        fi
-    fi
+    # Build common docker args
+    _build_docker_args "$name"
 
     # Claude Code permissions
     local skip_permissions
     skip_permissions=$(config_get_default '.claude.skip_permissions' 'false')
     if [ "$skip_permissions" = "true" ]; then
+        local firewall
+        firewall=$(config_get_default '.firewall' 'strict')
         if [ "$firewall" != "strict" ]; then
             warn "WARNING: skip_permissions is enabled without strict firewall!"
             warn "This is dangerous — Claude can access any network resource."
@@ -380,18 +254,12 @@ cmd_run() {
         skip_permissions_flag="--dangerously-skip-permissions"
     fi
 
-    # Resource limits
-    local memory_limit
-    memory_limit=$(config_get '.resources.memory')
-    if [ -n "$memory_limit" ]; then
-        docker_args+=("--memory" "$memory_limit")
-    fi
-
-    local cpu_limit
-    cpu_limit=$(config_get '.resources.cpus')
-    if [ -n "$cpu_limit" ]; then
-        docker_args+=("--cpus" "$cpu_limit")
-    fi
+    # Read claude.args from config
+    local claude_extra_args=()
+    while IFS= read -r arg; do
+        [ -z "$arg" ] && continue
+        claude_extra_args+=("$arg")
+    done < <(config_get '.claude.args[]')
 
     # Run
     if [ "$mode" = "headless" ]; then
@@ -414,7 +282,6 @@ cmd_run() {
         fi
         local timeout_cmd=""
         if [ -n "$timeout_val" ]; then
-            # Use gtimeout on macOS (from coreutils), timeout on Linux
             if command -v timeout &>/dev/null; then
                 timeout_cmd="timeout $timeout_val"
             elif command -v gtimeout &>/dev/null; then
@@ -425,17 +292,17 @@ cmd_run() {
             fi
         fi
 
-        $timeout_cmd docker run "${docker_args[@]}" \
+        $timeout_cmd docker run "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest" \
-            claude ${skip_permissions_flag} -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+            claude $skip_permissions_flag "${claude_extra_args[@]}" -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
-        docker run "${docker_args[@]}" \
+        docker run "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest" \
             "${passthrough_args[@]}"
     else
         log "Running sandbox-${name} interactively..."
-        docker run -it "${docker_args[@]}" \
+        docker run -it "${DOCKER_ARGS[@]}" \
             "sandbox-${name}:latest"
     fi
 }
@@ -502,6 +369,7 @@ _build_docker_args() {
             EDITOR|VISUAL|DOCKER_HOST|\
             http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
             SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*)
+                warn "Skipping dangerous env var '$key'"
                 continue ;;
         esac
         local val
@@ -516,7 +384,14 @@ _build_docker_args() {
         [ -z "$key" ] && continue
         case "$key" in
             user.name|user.email|init.defaultBranch|core.autocrlf|core.eol|push.default|pull.rebase|commit.gpgsign|tag.gpgsign|merge.ff) ;;
-            *) continue ;;
+            core.fsmonitor|core.sshCommand|core.hooksPath|core.pager)
+                warn "Blocked dangerous git config key '$key'"
+                continue
+                ;;
+            *)
+                warn "Blocked unknown git config key '$key'"
+                continue
+                ;;
         esac
         local val
         val=$(yq -r ".git.\"${key}\"" "$CONFIG_FILE")
@@ -531,15 +406,38 @@ _build_docker_args() {
     DOCKER_ARGS+=("-e" "SANDBOX_FIREWALL=${firewall}")
     if [ "$firewall" = "strict" ]; then
         DOCKER_ARGS+=("--cap-add" "NET_ADMIN" "--cap-add" "NET_RAW")
+
+        # Pass allowed_domains as comma-separated env var
+        local domains=""
+        local domain_count
+        domain_count=$(yq '.allowed_domains | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        if [ "$domain_count" != "null" ] && [ "$domain_count" -gt 0 ] 2>/dev/null; then
+            for i in $(seq 0 $((domain_count - 1))); do
+                local domain
+                domain=$(yq -r ".allowed_domains[$i]" "$CONFIG_FILE")
+                if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+                    error "Invalid domain '$domain'. Must be a valid domain name."
+                    exit 1
+                fi
+                domains="${domains:+${domains},}${domain}"
+            done
+        fi
+        if [ -n "$domains" ]; then
+            DOCKER_ARGS+=("-e" "SANDBOX_ALLOWED_DOMAINS=${domains}")
+        fi
     fi
 
     # Resource limits
     local memory_limit
     memory_limit=$(config_get '.resources.memory')
-    [ -n "$memory_limit" ] && DOCKER_ARGS+=("--memory" "$memory_limit")
+    if [ -n "$memory_limit" ]; then
+        DOCKER_ARGS+=("--memory" "$memory_limit")
+    fi
     local cpu_limit
     cpu_limit=$(config_get '.resources.cpus')
-    [ -n "$cpu_limit" ] && DOCKER_ARGS+=("--cpus" "$cpu_limit")
+    if [ -n "$cpu_limit" ]; then
+        DOCKER_ARGS+=("--cpus" "$cpu_limit")
+    fi
 }
 
 cmd_remote() {
@@ -618,9 +516,16 @@ cmd_claude() {
         fi
     fi
 
+    # Read claude.args from config
+    local claude_extra_args=()
+    while IFS= read -r arg; do
+        [ -z "$arg" ] && continue
+        claude_extra_args+=("$arg")
+    done < <(config_get '.claude.args[]')
+
     docker run -it "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
-        claude $skip_flag "$@"
+        claude $skip_flag "${claude_extra_args[@]}" "$@"
 }
 
 cmd_claude_local() {
