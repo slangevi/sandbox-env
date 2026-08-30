@@ -102,6 +102,241 @@ validate_model() {
     fi
 }
 
+# ── sparkyard backend ────────────────────────────────────────────────
+
+SPARK_DEFAULT_URL="http://host.docker.internal:14000"
+
+spark_config_path() {
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env"
+}
+
+# Read one KEY=VALUE from the sparkyard env file WITHOUT sourcing it.
+# Sourcing would execute arbitrary code as the user from a config file.
+_spark_config_read() {
+    local key="$1" file="$2" line val
+    [ -f "$file" ] || return 0
+    line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -n 1) || true
+    [ -z "$line" ] && return 0
+    val="${line#*=}"
+    val="${val%$'\r'}"
+    # Trim leading/trailing whitespace BEFORE stripping quotes: a stray
+    # space (easy to introduce when copying the value out of sparkyard's
+    # secrets.env) would otherwise ride along and 401 at the gateway with no
+    # hint why. This must run before quote-stripping — a trailing space
+    # AFTER a closing quote (e.g. `KEY="sk-abc" `) means the quote is no
+    # longer the last character, so trimming first is what lets the
+    # quote-strip below still find and remove it.
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    val="${val%\"}"; val="${val#\"}"
+    val="${val%\'}"; val="${val#\'}"
+    printf '%s\n' "$val"
+}
+
+_load_spark_env() {
+    # curl is only a hard dependency for the sparkyard backend (preflight,
+    # model listing), so it's checked here rather than added to the global
+    # require_tool list at the top of the script.
+    require_tool curl
+
+    local file perms
+    file=$(spark_config_path)
+
+    if [ -f "$file" ]; then
+        perms=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "")
+        if [ -n "$perms" ] && [ "${perms: -2}" != "00" ]; then
+            warn "$file is group/world-readable (mode $perms). Recommend: chmod 600 $file"
+        fi
+    fi
+
+    SPARK_URL="${SPARKYARD_URL:-$(_spark_config_read SPARKYARD_URL "$file")}"
+    SPARK_URL="${SPARK_URL:-$SPARK_DEFAULT_URL}"
+    SPARK_URL="${SPARK_URL%/}"
+    # Users copy the base URL straight out of LiteLLM's docs, which include
+    # the /v1 suffix; strip it so we don't end up hitting /v1/v1/models.
+    SPARK_URL="${SPARK_URL%/v1}"
+    if [[ ! "$SPARK_URL" =~ ^https?:// ]]; then
+        error "SPARKYARD_URL must start with http:// or https:// (got: $SPARK_URL)"
+        error "A value like a curl option (e.g. -K/path/to/file) is not a URL."
+        exit 1
+    fi
+    SPARK_KEY="${LITELLM_MASTER_KEY:-$(_spark_config_read LITELLM_MASTER_KEY "$file")}"
+    SPARK_DEFAULT_MODEL="${SPARKYARD_MODEL:-$(_spark_config_read SPARKYARD_MODEL "$file")}"
+
+    if [ -z "$SPARK_KEY" ]; then
+        error "No LiteLLM master key found for the sparkyard backend."
+        error "Create $file containing:"
+        error "  SPARKYARD_URL=$SPARK_DEFAULT_URL"
+        error "  LITELLM_MASTER_KEY=<your key>"
+        error "The key is the LITELLM_MASTER_KEY value in your sparkyard checkout's secrets.env."
+        error "Then restrict it: chmod 600 $file"
+        exit 1
+    fi
+}
+
+# The container reaches the gateway through host.docker.internal, which does
+# NOT resolve on the host itself. Rewrite it for host-side checks, or every
+# preflight fails on Linux while the actual launch works.
+_spark_host_url() {
+    echo "${SPARK_URL//host.docker.internal/localhost}"
+}
+
+# Query the gateway's /v1/models, exiting with a clear error if the master
+# key is rejected outright (rather than letting a 401 masquerade as "no
+# models"). Filters each returned id through the same pattern validate_model
+# enforces, so a hostile/misbehaving gateway can't smuggle a `"` into
+# generated YAML or a newline/escape sequence into a terminal (both callers
+# below print or interpolate these ids without further sanitizing them).
+#
+# On a rejected key this calls `exit 1` from INSIDE a command substitution,
+# i.e. in a subshell — that only aborts the whole CLI because both call sites
+# (below, and cmd_llm's --spark block) assign the result with a PLAIN
+# assignment: `models=$(_spark_list_models)`, whose own non-zero exit status
+# then trips the caller's `set -e`. If either call site is ever rewritten to
+# `local models=$(_spark_list_models)`, `local`'s own exit status silently
+# replaces the command substitution's, `set -e` never fires, and the 401
+# hard-fail degrades back into the "couldn't list models" warning F2 fixed.
+# Keep both call sites plain assignments — never `local x=$(_spark_list_models)`.
+_spark_list_models() {
+    local host_url body code m
+    host_url=$(_spark_host_url)
+    body=$(curl -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+        "${host_url}/v1/models" -H "x-api-key: ${SPARK_KEY}" 2>/dev/null) || true
+    code="${body##*$'\n'}"
+    case "$code" in
+        401|403)
+            error "Gateway rejected the master key (HTTP $code)."
+            error "Check LITELLM_MASTER_KEY in $(spark_config_path)."
+            exit 1 ;;
+    esac
+    while IFS= read -r m; do
+        [ -z "$m" ] && continue
+        if [[ "$m" =~ ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$ ]]; then
+            printf '%s\n' "$m"
+        else
+            warn "Skipping unusable model id from gateway response" >&2
+        fi
+    done < <(printf '%s\n' "${body%$'\n'*}" | yq -p json -r '.data[].id' 2>/dev/null || true)
+}
+
+_spark_preflight() {
+    local model="$1" host_url models
+    host_url=$(_spark_host_url)
+
+    if ! curl -sf --connect-timeout 5 --max-time 10 "${host_url}/health/liveliness" >/dev/null 2>&1; then
+        error "sparkyard gateway unreachable at ${host_url}"
+        error "Is the stack up? Try: sparkyard start"
+        exit 1
+    fi
+
+    models=$(_spark_list_models)
+
+    if [ -z "$models" ]; then
+        warn "Could not list models from ${host_url}/v1/models — skipping model validation."
+        return 0
+    fi
+
+    if ! echo "$models" | grep -Fxq "$model"; then
+        error "Model '$model' is not served by sparkyard."
+        error "Available models:"
+        echo "$models" | sed 's/^/  /' >&2
+        exit 1
+    fi
+
+    log "Model '$model' is available. The first call after a model swap can take several minutes while it loads."
+}
+
+# Refuses to proceed when this project's sandbox.yaml weakens egress control
+# (firewall not strict, or any allowed_domains set — an attacker-chosen
+# domain resolved into the strict-mode ipset is just as dangerous as no
+# firewall at all). The sparkyard master key is a LiteLLM gateway ADMIN
+# credential: it can mint new API keys and read every request log, so
+# shipping it into a sandbox with unrestricted or attacker-influenceable
+# egress is refused by default. SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 is an
+# explicit escape hatch for a project the caller trusts.
+#
+# Called from every spark entry point that will actually launch a container
+# carrying the key: cmd_claude_spark (covers both its attach and fresh
+# branches — this is called before that branch decision), cmd_remote_spark,
+# cmd_run's --spark block, and cmd_llm's --spark block. spark-status never
+# ships the key into a container, so it doesn't call this.
+_spark_guard_firewall() {
+    [ -n "${CONFIG_FILE:-}" ] || return 0
+    local fw allowed
+    fw=$(config_get_default '.firewall' 'strict')
+    # Do not pipe config_get's output into `head`: once allowed_domains is
+    # long enough to exceed the pipe buffer, `head` exits after its first
+    # line while config_get's `echo` is still writing, so the shell gets
+    # SIGPIPE (141) on write() — which `pipefail` promotes into a `set -e`
+    # exit. That kills the whole script with NO output whatsoever (still
+    # fail-closed, but silently). Capture the full list, then trim to the
+    # first line in bash.
+    allowed=$(config_get '.allowed_domains[]')
+    allowed=${allowed%%$'\n'*}
+    if [ "$fw" != "strict" ] || [ -n "$allowed" ]; then
+        error "This project's sandbox.yaml weakens egress control ($([ "$fw" != strict ] && echo "firewall: $fw" || echo "allowed_domains set"))."
+        error "The sparkyard master key is a gateway ADMIN credential; refusing to inject it."
+        error "Override with SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 if this project is trusted."
+        [ "${SPARKYARD_ALLOW_UNSAFE_FIREWALL:-0}" = "1" ] || exit 1
+        warn "SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 — proceeding with weakened egress control."
+    fi
+}
+
+_apply_spark_backend() {
+    # The container reaches the gateway through host.docker.internal, which
+    # is meaningless as a value of SPARKYARD_URL itself. A literal localhost
+    # (or 127.0.0.1) is a common misconfiguration — it works fine for the
+    # HOST-side preflight check (see _spark_host_url) but inside the
+    # container it addresses the container itself, not the host, so it
+    # would fail opaquely at request time instead of here.
+    local sp_host="${SPARK_URL#*://}"; sp_host="${sp_host%%[:/]*}"
+    case "$sp_host" in
+        host.docker.internal) ;;
+        localhost|127.0.0.1)
+            warn "SPARKYARD_URL points at localhost — inside the container that is the container itself, not the host. Use host.docker.internal." ;;
+    esac
+    DOCKER_ARGS+=("--add-host" "host.docker.internal:host-gateway")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_BASE_URL=$SPARK_URL")
+    DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=$SPARK_KEY")
+}
+
+# Runs docker, or prints the invocation when SANDBOX_DRY_RUN=1.
+# The master key is masked so dry-run output is safe to paste into a bug report.
+_spark_run() {
+    if [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+        local a out=()
+        for a in "$@"; do
+            [ -n "${SPARK_KEY:-}" ] && a="${a//"$SPARK_KEY"/***}"
+            out+=("$a")
+        done
+        printf 'docker'
+        printf ' %s' "${out[@]}"
+        printf '\n'
+        return 0
+    fi
+    docker "$@"
+}
+
+cmd_spark_status() {
+    _load_spark_env
+    local masked
+    if [ "${#SPARK_KEY}" -ge 12 ]; then
+        masked="${SPARK_KEY:0:4}...${SPARK_KEY: -2} (${#SPARK_KEY} chars)"
+    else
+        masked="**** (${#SPARK_KEY} chars)"
+    fi
+    echo "sparkyard backend configuration"
+    echo "  config file:   $(spark_config_path)"
+    echo "  url:           $SPARK_URL"
+    echo "  key:           $masked"
+    echo "  default model: ${SPARK_DEFAULT_MODEL:-(none)}"
+
+    if [ $# -gt 0 ]; then
+        validate_model "$1"
+        _spark_preflight "$1"
+    fi
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_build_base() {
@@ -224,6 +459,7 @@ cmd_run() {
     mode=$(config_get_default '.claude.mode' 'interactive')
     local passthrough_args=()
     local parsing_passthrough=false
+    local spark_model=""
 
     while [ $# -gt 0 ]; do
         if [ "$1" = "--" ]; then
@@ -235,13 +471,38 @@ cmd_run() {
             passthrough_args+=("$1")
         elif [ "$1" = "--headless" ]; then
             mode="headless"
+        elif [ "$1" = "--spark" ]; then
+            spark_model="${2:-}"
+            if [ -z "$spark_model" ] || [ "${spark_model#-}" != "$spark_model" ]; then
+                error "--spark requires a model name."
+                error "Usage: sandbox run --headless --spark <model> -- \"your prompt\""
+                exit 1
+            fi
+            shift
         fi
         shift
     done
 
+    if [ -n "$spark_model" ] && [ "$mode" != "headless" ]; then
+        error "--spark requires --headless."
+        error "Usage: sandbox run --headless --spark <model> -- \"your prompt\""
+        error "For an interactive session against sparkyard, use: sandbox claude-spark <model>"
+        exit 1
+    fi
+
     # Build common docker args
     _build_docker_args "$name"
     _read_claude_config
+
+    if [ -n "$spark_model" ]; then
+        _load_spark_env
+        _spark_guard_firewall
+        validate_model "$spark_model"
+        _spark_preflight "$spark_model"
+        _apply_spark_backend
+        DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
+        CLAUDE_EXTRA_ARGS+=("--model" "$spark_model")
+    fi
 
     # Run
     if [ "$mode" = "headless" ]; then
@@ -274,9 +535,15 @@ cmd_run() {
             fi
         fi
 
-        $timeout_cmd docker run "${DOCKER_ARGS[@]}" \
-            "sandbox-${name}:latest" \
-            claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+        if [ -n "$spark_model" ] && [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+            _spark_run run "${DOCKER_ARGS[@]}" \
+                "sandbox-${name}:latest" \
+                claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} -p "${passthrough_args[*]}"
+        else
+            $timeout_cmd docker run "${DOCKER_ARGS[@]}" \
+                "sandbox-${name}:latest" \
+                claude $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} -p "${passthrough_args[*]}" 2>&1 | tee "$log_file"
+        fi
     elif [ ${#passthrough_args[@]} -gt 0 ]; then
         log "Running sandbox-${name} with command..."
         docker run "${DOCKER_ARGS[@]}" \
@@ -580,6 +847,82 @@ cmd_claude_local() {
         claude --model "$model" $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} "$@"
 }
 
+cmd_claude_spark() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    _load_spark_env
+    # Called once, before the attach-vs-fresh branch below, so it guards both:
+    # the attach (docker exec) branch used to skip this entirely.
+    _spark_guard_firewall
+
+    # Validate arguments BEFORE the image guard: cheap checks first, and a bad
+    # model name should say so rather than blaming a missing image.
+    #
+    # $1 must NOT be consumed as the model name when it looks like a flag
+    # (e.g. --continue, --resume) — otherwise a configured SPARKYARD_MODEL
+    # default and flag pass-through are mutually exclusive. Same guard as
+    # `run --spark` (commit 1dc4f15).
+    local model="$SPARK_DEFAULT_MODEL"
+    if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        model="$1"
+        shift
+    fi
+    if [ -z "$model" ]; then
+        error "Usage: sandbox claude-spark <model> [claude-args...]"
+        error "Example: sandbox claude-spark qwen3-coder-next"
+        error "Or set SPARKYARD_MODEL in $(spark_config_path)"
+        exit 1
+    fi
+    validate_model "$model"
+
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _spark_preflight "$model"
+
+    # Already running: exec in. The running container may lack the
+    # host.docker.internal alias, so resolve the gateway IP from the host.
+    if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
+        local exec_url="$SPARK_URL" gw
+        if [[ "$exec_url" == *host.docker.internal* ]]; then
+            # A trailing separator after each gateway lets awk disambiguate a
+            # multi-network container instead of concatenating them with no
+            # boundary (which `head -n1` alone can't parse back apart).
+            gw=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "sandbox-${name}" 2>/dev/null | awk '{print $1; exit}')
+            if [ -n "$gw" ]; then
+                exec_url="${exec_url//host.docker.internal/$gw}"
+            else
+                warn "Could not resolve the container's gateway; host.docker.internal may not resolve inside it."
+            fi
+        fi
+        log "Attaching to Claude Code (sparkyard: $model) in sandbox-${name}..."
+        _spark_run exec -it \
+            -e "ANTHROPIC_BASE_URL=$exec_url" \
+            -e "ANTHROPIC_AUTH_TOKEN=$SPARK_KEY" \
+            -e "ANTHROPIC_API_KEY=" \
+            "sandbox-${name}" claude --model "$model" "$@"
+        return
+    fi
+
+    log "Starting Claude Code with sparkyard model: $model"
+    _build_docker_args "$name"
+    _read_claude_config
+    _apply_spark_backend
+    DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
+
+    _spark_run run -it "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        claude --model "$model" $SKIP_PERMISSIONS_FLAG ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} "$@"
+}
+
 cmd_remote_local() {
     find_config
     local name
@@ -643,6 +986,83 @@ cmd_remote_local() {
         claude remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
 }
 
+cmd_remote_spark() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    _load_spark_env
+    _spark_guard_firewall
+
+    # Validate arguments before the image guard, matching cmd_claude_spark.
+    #
+    # $1 must NOT be consumed as the model name when it looks like a flag
+    # (e.g. --name, --spawn) — otherwise a configured SPARKYARD_MODEL
+    # default and flag pass-through are mutually exclusive. Same guard as
+    # `run --spark` (commit 1dc4f15).
+    local model="$SPARK_DEFAULT_MODEL"
+    if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        model="$1"
+        shift
+    fi
+    if [ -z "$model" ]; then
+        error "Usage: sandbox remote-spark <model> [--name <session>] [--spawn <mode>]"
+        error "Example: sandbox remote-spark qwen3-coder-next"
+        exit 1
+    fi
+    validate_model "$model"
+
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _spark_preflight "$model"
+
+    local session_name="${name}-spark"
+    local spawn_mode="same-dir"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name)
+                session_name="${2:-}"
+                if [ -z "$session_name" ]; then
+                    error "--name requires a session name."
+                    exit 1
+                fi
+                shift 2 ;;
+            --spawn)
+                spawn_mode="${2:-}"
+                if [ -z "$spawn_mode" ]; then
+                    error "--spawn requires a mode."
+                    exit 1
+                fi
+                shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    log "Starting Claude Code remote control with sparkyard model: $model"
+    log "Connect via claude.ai/code — inference routes to the sparkyard gateway"
+    warn "remote-control with a redirected backend is unverified upstream."
+    warn "If the session fails to register, report it rather than working around it."
+    echo ""
+
+    _build_docker_args "$name"
+    _read_claude_config
+    # Send the gateway key for inference, but keep real claude.ai auth for
+    # session management — do NOT blank ANTHROPIC_API_KEY here.
+    _apply_spark_backend
+    DOCKER_ARGS+=("-e" "ANTHROPIC_MODEL=$model")
+
+    _spark_run run -it "${DOCKER_ARGS[@]}" \
+        "sandbox-${name}:latest" \
+        claude remote-control --name "$session_name" --spawn "$spawn_mode" --verbose
+}
+
 cmd_ollama() {
     find_config
     local name
@@ -679,9 +1099,29 @@ cmd_llm() {
         exit 1
     fi
 
+    local spark=false
+    if [ "${1:-}" = "--spark" ]; then
+        spark=true
+        shift
+        _load_spark_env
+        _spark_guard_firewall
+    fi
+
     # If container is running, exec into it
     if [ "$(docker container inspect --format '{{.State.Running}}' "sandbox-${name}" 2>/dev/null)" = "true" ]; then
-        docker exec -it "sandbox-${name}" bash -lc 'llm "$@"' _ "$@"
+        if $spark; then
+            # Can't be made to work: the gateway's model registry has to be
+            # mounted as a directory at container start (see below), and
+            # `docker exec` cannot add a new mount to an already-running
+            # container. Refuse cleanly instead of shipping a silently
+            # broken path that only sets inert OPENAI_* env vars.
+            error "llm --spark cannot attach to an already-running sandbox."
+            error "The gateway model registry must be mounted at container start."
+            error "Run 'sandbox stop' first, then retry."
+            exit 1
+        else
+            docker exec -it "sandbox-${name}" bash -lc 'llm "$@"' _ "$@"
+        fi
         return
     fi
 
@@ -692,6 +1132,98 @@ cmd_llm() {
     fi
 
     _build_docker_args "$name"
+    if $spark; then
+        # llm 0.24 has no OpenAI-compatible passthrough: it never reads
+        # OPENAI_BASE_URL, and get_model() resolves `-m NAME` against
+        # registered model ids/aliases ONLY — never against model_name
+        # (llm/__init__.py get_model_aliases()). So a single placeholder
+        # entry (e.g. model_id: sparkyard) would only ever answer to
+        # `-m sparkyard`, never to the real sparkyard model names people
+        # actually type (`-m qwen3-coder-next`, etc). Register one
+        # extra-openai-models.yaml entry per model the gateway currently
+        # serves, with model_id set to the gateway's own model id, so
+        # `-m <model>` resolves directly. (Confirmed against the 0.24
+        # source; also confirmed empirically that dropping api_key_name
+        # here makes llm send a hardcoded "DUMMY_KEY" instead of falling
+        # back to $OPENAI_API_KEY — openai_models.py sets needs_key=None
+        # whenever api_base is set, UNLESS api_key_name overrides it, so
+        # api_key_name must stay.)
+        #
+        # Mounted under /home/node/.sparkyard-llm (NOT llm's default
+        # ~/.config/io.datasette.llm): entrypoint.sh symlinks
+        # /home/node/.config into the persistent volume via `rm -rf
+        # /home/node/.config && ln -sfn ...`, and rm fails ("Device or
+        # resource busy") on a directory containing a bind-mounted file,
+        # aborting the entrypoint under set -e. LLM_USER_PATH redirects
+        # llm's own config lookup there instead.
+        #
+        # The registry is generated on the HOST, so it can't be trusted to
+        # be readable by the container's node user on every host: host uid
+        # varies (CI runs as uid 1001; multi-user Linux and macOS commonly
+        # differ from the image's uid 1000 too), and mktemp -d's ownership
+        # just passes that host uid straight through. So instead of gating
+        # on a specific host uid, ownership is made a non-issue: the
+        # registry is bind-mounted READ-ONLY at a neutral path
+        # (/tmp/sparkyard-llm) that any container user can read regardless
+        # of host uid, then copied at container start into a directory the
+        # container itself creates and owns (~/.sparkyard-llm) — which
+        # `llm` can write logs.db into.
+        #
+        # Trade-off: LLM_USER_PATH relocates llm's ENTIRE user directory
+        # (keys, aliases, templates, and the `llm logs` history db) to
+        # this temp dir, which is deleted when the command exits. None of
+        # that persists between --spark invocations.
+        warn "llm --spark: history, keys, and templates are not persisted between runs."
+
+        local host_url models_list
+        host_url=$(_spark_host_url)
+        models_list=$(_spark_list_models)
+        if [ -z "$models_list" ]; then
+            error "Could not list models from ${host_url}/v1/models"
+            error "Is the sparkyard stack up? Try: sparkyard start"
+            exit 1
+        fi
+
+        # spark_tmp is intentionally NOT `local`: the EXIT trap below fires
+        # after this function has already returned (control is back in the
+        # top-level case statement), by which point a `local` would be out
+        # of scope and `set -u` would abort the trap itself with "unbound
+        # variable" — reproduced with the previous `local spark_tmp` +
+        # double-quoted-trap combination. Making it a script-global lets the
+        # trap body stay single-quoted (deferred expansion) and still find
+        # the right value at trap-fire time.
+        local llm_cfg
+        spark_tmp=$(mktemp -d)
+        trap 'rm -rf "$spark_tmp"' EXIT INT TERM
+        llm_cfg="$spark_tmp/extra-openai-models.yaml"
+        : > "$llm_cfg"
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            {
+                echo "- model_id: \"$m\""
+                echo "  model_name: \"$m\""
+                echo "  api_base: \"${SPARK_URL}/v1\""
+                echo "  api_key_name: sparkyard"
+            } >> "$llm_cfg"
+        done <<< "$models_list"
+
+        # Only now does the registry actually exist — log success after
+        # generating it, not before (previously this fired even before the
+        # uid gate that could abort the command entirely).
+        log "sparkyard models registered. The first call after a model swap can take several minutes while it loads."
+
+        chmod 0755 "$spark_tmp"
+        chmod 0644 "$llm_cfg"
+        DOCKER_ARGS+=("--add-host" "host.docker.internal:host-gateway")
+        DOCKER_ARGS+=("-v" "$spark_tmp:/tmp/sparkyard-llm:ro")
+        DOCKER_ARGS+=("-e" "LLM_USER_PATH=/home/node/.sparkyard-llm")
+        DOCKER_ARGS+=("-e" "OPENAI_API_KEY=${SPARK_KEY}")
+        _spark_run run "${DOCKER_ARGS[@]}" \
+            "sandbox-${name}:latest" \
+            bash -lc 'mkdir -p ~/.sparkyard-llm && cp /tmp/sparkyard-llm/extra-openai-models.yaml ~/.sparkyard-llm/ && llm "$@"' _ "$@"
+        return
+    fi
+
     docker run "${DOCKER_ARGS[@]}" \
         "sandbox-${name}:latest" \
         bash -lc 'llm "$@"' _ "$@"
@@ -1087,13 +1619,16 @@ Usage: sandbox <command> [options]
 Commands:
   build-base          Build the base sandbox image
   build [--no-cache]   Build project image from sandbox.yaml
-  run [--headless]    Run the sandbox container
+  run [--headless] [--spark <model>]  Run the sandbox container
   claude              Launch Claude Code directly
   remote              Start Claude Code remote control server
   claude-local <model>  Launch Claude Code with a local Ollama model
+  claude-spark <model>  Launch Claude Code against the sparkyard gateway
   remote-local <model>  Remote control with a local Ollama model
+  remote-spark <model>  Remote control backed by the sparkyard gateway
   ollama <cmd>        Run Ollama commands in the sandbox
-  llm [args]          Run the llm CLI in the sandbox
+  llm [--spark] [args]  Run the llm CLI in the sandbox
+  spark-status [model]  Show sparkyard backend config (and check a model)
   login               Authenticate Claude Code for this project
   exec <cmd>          Run a command in the running sandbox
   start               Start the sandbox in the background
@@ -1120,9 +1655,12 @@ case "${1:-help}" in
     claude)         shift; cmd_claude "$@" ;;
     remote)         shift; cmd_remote "$@" ;;
     claude-local)   shift; cmd_claude_local "$@" ;;
+    claude-spark)   shift; cmd_claude_spark "$@" ;;
     remote-local)   shift; cmd_remote_local "$@" ;;
+    remote-spark)   shift; cmd_remote_spark "$@" ;;
     ollama)         shift; cmd_ollama "$@" ;;
     llm)            shift; cmd_llm "$@" ;;
+    spark-status)   shift; cmd_spark_status "$@" ;;
     login)          cmd_login ;;
     exec)           cmd_exec "$@" ;;
     start)          cmd_start ;;

@@ -103,6 +103,17 @@ check_fails "models pull invalid name" "$SANDBOX" models pull '"; rm -rf /'
 # -- clean-models when no volume --
 check "clean-models when no volume" "$SANDBOX" clean-models
 
+# -- sparkyard backend commands appear in help --
+# This file's check_output runs a bare `grep -q "$expected"`, so an expected
+# string must NEVER start with a dash — grep would parse it as an option.
+check_output "help lists claude-spark" "claude-spark" "$SANDBOX" help
+check_output "help lists remote-spark" "remote-spark" "$SANDBOX" help
+check_output "help lists spark-status" "spark-status" "$SANDBOX" help
+# "run [--headless]" pre-dates this branch (git show 3dee12a:cli/sandbox line
+# 1090) and would pass even if --spark were never added to the help text at
+# all. Assert the --spark-specific portion instead.
+check_output "help documents run --spark" "\[--spark <model>\]" "$SANDBOX" help
+
 # Clean up
 "$SANDBOX" clean 2>/dev/null
 

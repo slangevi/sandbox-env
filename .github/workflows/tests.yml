@@ -49,6 +49,9 @@ jobs:
       - name: Test convenience commands
         run: tests/test-commands.sh
 
+      - name: Test sparkyard backend
+        run: tests/test-spark.sh
+
       - name: Test YAML validation
         run: tests/test-yaml-validation.sh
 

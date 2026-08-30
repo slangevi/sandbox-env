@@ -8,6 +8,7 @@ A Docker sandbox for running Claude Code in isolated, per-project customizable c
 ```bash
 brew install --cask docker   # or install Docker Desktop from docker.com
 brew install yq
+# curl ships with macOS
 ```
 
 **Linux (Debian/Ubuntu):**
@@ -19,7 +20,14 @@ sudo usermod -aG docker $USER  # then log out and back in
 # yq
 sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_$(dpkg --print-architecture)
 sudo chmod +x /usr/local/bin/yq
+
+# curl (only if not already installed)
+sudo apt-get install -y curl
 ```
+
+`curl` is required by the sparkyard backend commands (`claude-spark`,
+`remote-spark`, `run --spark`, `llm --spark`, `spark-status`) to reach the
+gateway.
 
 ## Quick Start
 
@@ -172,13 +180,16 @@ Drop a script in `features/`. It must:
 ```
 sandbox build-base          Build the base image (once, or to update)
 sandbox build [--no-cache]  Build project image from sandbox.yaml
-sandbox run [--headless] [-- <cmd>]  Run the container, a command, or headless Claude
+sandbox run [--headless] [--spark <model>] [-- <cmd>]  Run the container, a command, headless Claude, or a spark-backed headless run
 sandbox claude              Launch Claude Code (Anthropic API)
 sandbox claude-local <model> Launch Claude Code with a local Ollama model
+sandbox claude-spark <model> Launch Claude Code against the sparkyard gateway
 sandbox remote              Remote control via claude.ai/code (Anthropic API)
 sandbox remote-local <model> Remote control with a local Ollama model
+sandbox remote-spark <model> Remote control backed by the sparkyard gateway
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
-sandbox llm [args]          Run the llm CLI in the sandbox
+sandbox llm [--spark] [args] Run the llm CLI in the sandbox, or against sparkyard with --spark
+sandbox spark-status [model] Show sparkyard backend config (and check a model)
 sandbox login               Authenticate Claude Code for this project
 sandbox start               Start the sandbox in the background
 sandbox exec <cmd>          Run a command in a running container
@@ -486,6 +497,7 @@ Step-by-step guides for common use cases:
 
 - [Python Development](docs/howto/python-development.md) — Set up a sandbox for Python projects with pip, venv, testing, and linting
 - [Local LLM Coding](docs/howto/local-llm-coding.md) — Use Ollama models to power Claude Code fully offline, no API key needed
+- [GPU-Backed Coding with sparkyard](docs/howto/sparkyard-gb10.md) — Route Claude Code to a sparkyard gateway for GPU-backed local models on a DGX Spark
 - [Agentic Automation](docs/howto/agentic-automation.md) — Run Claude Code autonomously with strict firewall, timeouts, and resource limits
 - [Multi-Model Workflow](docs/howto/multi-model-workflow.md) — Combine Claude API for complex tasks with free local models for quick work
 - [Full-Stack Web Development](docs/howto/fullstack-web-development.md) — Python + Node.js sandbox with databases and custom setup
