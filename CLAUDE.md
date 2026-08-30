@@ -21,6 +21,7 @@ tests/test-volumes.sh          # Volume lifecycle, persistence, cleanup
 tests/test-git-config.sh       # Git config from sandbox.yaml
 tests/test-headless.sh         # Headless mode and output capture
 tests/test-commands.sh         # Convenience commands (claude, ollama, llm, models)
+tests/test-spark.sh            # sparkyard gateway backend: config, preflight, dry-run argument wiring
 tests/test-yaml-validation.sh  # YAML parsing and validation
 tests/test-cli-integration.sh  # Every CLI command end-to-end (start, exec, stop lifecycle)
 tests/test-entrypoint.sh       # Entrypoint: PATH, volumes, permissions, services (slow)
@@ -36,16 +37,17 @@ bash -n cli/sandbox
 tests/test-firewall.sh
 ```
 
-Tests require Docker running. Each test builds/runs/cleans its own containers. `test-integration.sh` is the slowest (~2-3 min, builds python+llm features).
+Tests require Docker running. Each test builds/runs/cleans its own containers. `test-integration.sh` is the slowest (~2-3 min, builds python+llm features). `tests/test-spark.sh` additionally requires host `python3` — it's the only test that runs a local stub gateway (`http.server`) instead of the real sparkyard stack.
 
 ## Architecture
 
 **`cli/sandbox`** — The entire CLI is one bash script. Key internal structure:
 
 - **Shared helpers** (used by multiple commands):
-  - `_build_docker_args "$name"` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_llm`, `cmd_ollama`.
+  - `_build_docker_args "$name"` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`, `cmd_llm`, `cmd_ollama`.
   - `_read_claude_config` — Sets global `CLAUDE_EXTRA_ARGS` array and `SKIP_PERMISSIONS_FLAG` string from `sandbox.yaml`. Used by same commands.
   - `config_get` / `config_get_default` — YAML reading via Mike Farah's yq v4 (NOT jq-syntax yq).
+  - `_load_spark_env` / `_apply_spark_backend` / `_spark_preflight` / `_spark_host_url` / `_spark_run` — sparkyard gateway backend, used by `cmd_spark_status`, `cmd_claude_spark`, `cmd_remote_spark`, and the `--spark` paths of `cmd_run` and `cmd_llm`. `_load_spark_env` reads (never `source`s) `${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env` for `SPARKYARD_URL` / `LITELLM_MASTER_KEY` / `SPARKYARD_MODEL`; a real env var of the same name always wins over the file. `_spark_host_url` rewrites `host.docker.internal` to `localhost` because that alias only resolves inside the container, not on the host doing the preflight check. `_spark_preflight` checks gateway reachability and that a given model is actually served before anything launches. `SANDBOX_DRY_RUN=1` makes `_spark_run` print the `docker` argv it would execute (master key masked) instead of running it — this is how `tests/test-spark.sh` asserts argument wiring without Docker; the preflight check still runs first, dry-run or not.
 
 - **Input validation**: `validate_name`, `validate_feature`, `validate_package`, `validate_model` — regex checks called before any value is used in Docker/filesystem operations.
 
@@ -72,7 +74,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 - After any change: `bash -n cli/sandbox` to syntax-check, then `cd tests/fixtures && ../../cli/sandbox build && ../../cli/sandbox run -- echo "works" && ../../cli/sandbox clean`.
 - The global arrays `DOCKER_ARGS`, `CLAUDE_EXTRA_ARGS`, and `SKIP_PERMISSIONS_FLAG` are set by helpers and consumed by callers. Don't declare them as `local`.
 - yq on this system is Mike Farah's yq v4. Syntax differs from jq-based yq. Use `yq -r '.key'` not `yq -r '.key // empty'`.
-- The dispatch `case` statement does `shift` before calling commands that accept args (`claude`, `claude-local`, `remote`, `remote-local`, `ollama`, `llm`, `run`, `build`). Two exceptions: `exec` and `models` receive full `"$@"` and handle the shift internally.
+- The dispatch `case` statement does `shift` before calling commands that accept args (`claude`, `claude-local`, `claude-spark`, `remote`, `remote-local`, `remote-spark`, `ollama`, `llm`, `run`, `build`, `spark-status`). Two exceptions: `exec` and `models` receive full `"$@"` and handle the shift internally.
 
 ## When Adding a Feature Script
 
