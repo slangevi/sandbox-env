@@ -115,6 +115,119 @@ claude:
 
 All fields except `name` are optional. Defaults: no features, no extra packages, mount `.` to `/workspace`, firewall strict, interactive mode.
 
+### Mount safety
+
+`sandbox.yaml` is committed and travels with a repo, so `mounts:` entries are
+validated before the container starts. (The default `$(pwd):/workspace` mount
+used when `mounts:` is omitted is not part of this — it's chosen by whoever
+runs the command, not supplied by the config.) A bare `host:` name (e.g.
+`host: cache`) is a Docker **named volume**, not a host path, and takes a
+different path entirely: none of the host-path validation below applies to
+it, because Docker manages the volume itself and it cannot expose any host
+file no matter what name it's given.
+
+- **The Docker socket is always refused, with no override.** This is a
+  containment check, not just an identity check: mounting the socket's parent
+  directory (e.g. `/var/run`) is refused too, because it hands the container
+  the same socket at a different path. A directory that merely contains a file
+  named `docker.sock` for any other reason is refused the same way — mount a
+  subdirectory instead.
+- **A `..` path component that can't be resolved is always refused, with no
+  override.** Docker cleans such paths up lexically when it builds the mount,
+  so an unresolved traversal like `/nope/../etc` would otherwise reach the
+  host's real `/etc` past every check below.
+- **Credential and system paths are refused unless
+  `SANDBOX_ALLOW_UNSAFE_MOUNTS=1` is set**, matched by prefix (the path itself
+  or anything beneath it): `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
+  `~/.config/gcloud`, `~/.docker`, `~/.claude`, `~/.claude.json`,
+  `~/.colima`, `~/.orbstack`, `~/.lima`, `/etc`, `/usr`, `/boot`, `/proc`,
+  `/sys`, `/run`, `/var/run`, `/root`, `/var/lib/docker`. `/run` and
+  `/var/run` are genuinely part of this overridable tier like every other
+  entry here, but in practice the override rarely gets a chance to apply to
+  them: on almost every system one of the two either is, or contains, the
+  Docker socket, and the no-override socket check above runs first and
+  refuses a path that is or contains the socket regardless of tier —
+  `SANDBOX_ALLOW_UNSAFE_MOUNTS=1` only ever reaches these two entries on a
+  system where neither happens to hold the socket.
+- **`$HOME`, `/`, and `/home` are refused unless overridden**, matched
+  exactly rather than by prefix (prefix-matching `$HOME` would also catch the
+  everyday `$(pwd):/workspace` mount for any project living under it, and
+  prefix-matching `/home` would catch almost every mount on Linux).
+
+Paths are resolved before matching, and the mount itself is built from that
+resolved path, so `../../.ssh` is caught too.
+
+Two things worth knowing that the checks above do **not** cover:
+
+- `host: /var` is allowed. On a system where `/var/run` is a real directory
+  rather than a symlink to `/run`, that would expose the Docker socket the
+  same way `/var/run` does directly; it also exposes `/var/lib/docker`
+  regardless. `/var` isn't on the refusal list because macOS's `mktemp`
+  returns paths under `/var/folders/...`, and refusing `/var` outright would
+  break ordinary temp-dir mounts on a supported platform.
+- `host: /` under an explicit `SANDBOX_ALLOW_UNSAFE_MOUNTS=1` still reaches
+  the real Docker socket — just nested under the mount's container path
+  (e.g. `<container-path>/run/docker.sock`) instead of at a path this checks
+  directly. The no-override socket rule only catches a mount that is or
+  directly contains the socket, not one that reaches it transitively through
+  an allowed root.
+
+### Config tamper protection
+
+`sandbox.yaml`/`sandbox.yml` is committed and travels with the repo, but the
+project root is bind-mounted **read-write** so the agent can work on it — which
+means the agent can also edit its own config. Left unchecked, that closes a
+loop: a prompt-injected agent edits `sandbox.yaml` (say, turning on
+`skip_permissions` or loosening the firewall), and the operator's *next*
+`sandbox run` picks up whatever the agent wrote, starting an escalated
+container without the operator choosing that.
+
+To close it, the resolved config file is overlaid with a read-only file-level
+bind mount inside the container — over the default `/workspace` mount and
+over every custom `mounts:` entry that exposes it (a config reachable through
+several mounts gets an overlay on each; a named volume, which exposes no host
+files, never does). A mount whose *own* source is the config file itself
+skips the overlay too, but isn't left writable either: that mount is instead
+forced read-only directly, the moment its resolved source is seen to match
+the config's own resolved path — the operator's explicit choice of mount is
+honoured, it just can never be a way to write to the config. Docker sorts
+bind destinations by depth, so this file-level mount always wins over the
+enclosing directory mount:
+
+- Writes fail (`:ro`).
+- `rm` and rename-over fail with `EBUSY` — a bind mountpoint cannot be
+  unlinked.
+- Reads still work, so the agent can see its own config and *propose* changes
+  in conversation; only the operator, on the host, can actually apply them.
+
+`SANDBOX_ALLOW_WRITABLE_CONFIG=1` is a runner-side escape hatch that skips the
+overlay entirely, for a project where the operator genuinely wants the agent
+editing its own config. Like `SANDBOX_ALLOW_UNSAFE_MOUNTS`, it's an
+environment variable the runner sets, never a `sandbox.yaml` key — the config
+must not be able to unprotect itself.
+
+This still leaves one gap the overlay alone can't close: `find_config`
+prefers `sandbox.yaml` over `sandbox.yml`, so an agent that can't edit a
+protected `sandbox.yml` could just *create* a new `sandbox.yaml` next to it
+through the writable workspace mount, silently winning precedence on the
+operator's next run. If both files exist, the CLI refuses outright and tells
+the operator to inspect whichever one they didn't create themselves.
+
+### claude.args safety
+
+Flags that would change Claude Code's trust, permissions, or credential
+routing are refused: `--dangerously-skip-permissions`,
+`--allow-dangerously-skip-permissions`, `--no-sandbox`, `--permission-mode`,
+`--settings`, `--setting-sources`, `--mcp-config`, `--plugin-dir`,
+`--plugin-url`, `--agents`, `--agent`, `--add-dir`, `--allowedTools`,
+`--allowed-tools`, `--tools`, `--system-prompt`, `--append-system-prompt`,
+`--bare`, `--betas`. Both `--flag value` and
+`--flag=value` spellings are caught. This is a hard error, not a silent drop —
+dropping a flag that takes a value would leave that value behind as a bare
+argument, still passed to `claude`. Use `claude.skip_permissions: true`
+instead of `--dangerously-skip-permissions`/`--no-sandbox`. Unrecognized
+flags are allowed, with a warning.
+
 ### Git configuration
 
 Set git identity per project in `sandbox.yaml`:

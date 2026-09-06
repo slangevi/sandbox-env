@@ -55,6 +55,9 @@ jobs:
       - name: Test YAML validation
         run: tests/test-yaml-validation.sh
 
+      - name: Test config trust
+        run: tests/test-config-trust.sh
+
       - name: Test CLI integration (start, exec, stop lifecycle)
         run: tests/test-cli-integration.sh
 

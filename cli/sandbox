@@ -10,9 +10,16 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[sandbox]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[sandbox]${NC} $*"; }
-error() { echo -e "${RED}[sandbox]${NC} $*" >&2; }
+# %b expands the colour variables' own backslash escapes; %s does NOT — the
+# message itself is never escape-interpreted. That distinction matters
+# because sandbox.yaml is committed, attacker-influenced input: a `host:` or
+# arg value containing e.g. "\n\033[0;32m[sandbox] Mount verified OK" fed
+# through `echo -e "$*"` would forge a convincing fake success line inside a
+# real warning (or, with "\r\033[K", erase the warning outright). `printf`
+# with the message as a %s argument can't be made to do either.
+log()   { printf '%b[sandbox]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[sandbox]%b %s\n' "$YELLOW" "$NC" "$*"; }
+error() { printf '%b[sandbox]%b %s\n' "$RED" "$NC" "$*" >&2; }
 
 # Check for required tools
 require_tool() {
@@ -30,6 +37,22 @@ require_tool yq
 CONFIG_FILE=""
 
 find_config() {
+    # A precedence hole: this function has always silently preferred
+    # sandbox.yaml over sandbox.yml (the branch below). The overlay in
+    # _build_docker_args makes the file the AGENT sees tamper-proof, but it
+    # cannot stop file CREATION: an agent that cannot edit a project's real
+    # sandbox.yml can simply create a new sandbox.yaml next to it through the
+    # read-write workspace mount, and that new file silently wins precedence
+    # on the operator's next invocation. Refuse outright whenever both exist,
+    # so the operator is told exactly what to inspect instead of unknowingly
+    # running whichever one an agent planted.
+    if [ -f "${1:-sandbox.yaml}" ] && [ -f "sandbox.yml" ]; then
+        error "Both sandbox.yaml and sandbox.yml exist in this directory."
+        error "The CLI would silently prefer sandbox.yaml. Remove one — and if you did not"
+        error "create the other yourself, treat it as agent tampering and inspect it first."
+        exit 1
+    fi
+
     if [ -f "${1:-sandbox.yaml}" ]; then
         CONFIG_FILE="${1:-sandbox.yaml}"
     elif [ -f "sandbox.yml" ]; then
@@ -100,6 +123,595 @@ validate_model() {
         error "Invalid model name '$model'. Must match: ^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$"
         exit 1
     fi
+}
+
+# ── Config trust ─────────────────────────────────────────────────────
+# A project's sandbox.yaml is committed and travels with the repo, so it is
+# not fully trusted input. These validators refuse the config shapes that
+# would let a committed file read host files, escalate the agent's
+# permissions, or escape the container.
+
+# Env var names must be identifier-shaped (letters/digits/'_', plus '.'/'-'
+# after the first character — see the widening comment inside the function
+# below). This is the control that stops a YAML
+# key from being interpreted as a yq EXPRESSION rather than a lookup: a key of
+#   ? 'LEAK | load_str("/home/you/.ssh/id_rsa")'
+# would otherwise read that file as the invoking user and place its contents
+# into a container environment variable.
+validate_env_key() {
+    local key="$1"
+    # Widened (deliberate, owner-approved) to allow '.' and '-' after the
+    # first character: docker's `-e KEY=VAL` accepts both, main allowed
+    # them, and the key only ever reaches yq via `strenv` (data, never
+    # expression text) — see the comment above this function. Neither '.'
+    # nor '-' can split a docker -e argument or start an option, and the
+    # first character is still required to be a letter or underscore, so
+    # every character class the injection in that comment needs (space,
+    # quote, pipe, parens, '$', backtick, brackets) stays refused.
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]]; then
+        error "Invalid env var name '$key' in $CONFIG_FILE."
+        error "Env names must match: ^[A-Za-z_][A-Za-z0-9_.-]*\$"
+        exit 1
+    fi
+}
+
+# Flags that let a committed sandbox.yaml change Claude Code's trust,
+# permissions, or where credentials are sent.
+#
+# Blocking is a HARD ERROR, not a drop. Dropping is unsafe for any flag that
+# takes a value: given args ["--settings", "{...}"], dropping "--settings"
+# would leave "{...}" in the array, still passed to claude as a bare argument.
+# Skipping the value too would require knowing each flag's arity.
+CLAUDE_ARG_BLOCKED=(
+    --dangerously-skip-permissions
+    --allow-dangerously-skip-permissions
+    --no-sandbox
+    --permission-mode
+    --settings
+    --setting-sources
+    --mcp-config
+    --plugin-dir
+    --plugin-url
+    --agents
+    --agent
+    --add-dir
+    --allowedTools
+    --allowed-tools
+    --tools
+    --system-prompt
+    --append-system-prompt
+    --bare
+    --betas
+)
+
+# Flags known not to affect trust. A starting set, not a closed one — additions
+# are fine, but check each against Claude Code's actual behavior rather than
+# assuming it is benign from its name.
+CLAUDE_ARG_KNOWN_SAFE=(
+    --continue
+    --resume
+    --model
+    --verbose
+    --print
+)
+
+validate_claude_arg() {
+    local arg="$1"
+    local bare="${arg%%=*}"
+    local b s
+
+    for b in "${CLAUDE_ARG_BLOCKED[@]}"; do
+        if [ "$bare" = "$b" ]; then
+            error "Blocked claude.args value '$arg' in $CONFIG_FILE."
+            error "This flag can change Claude Code's trust, permissions, or credential"
+            error "routing, which a committed config file must not decide."
+            case "$b" in
+                --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--no-sandbox)
+                    error "Use 'claude.skip_permissions: true' instead." ;;
+            esac
+            exit 1
+        fi
+    done
+
+    for s in "${CLAUDE_ARG_KNOWN_SAFE[@]}"; do
+        [ "$bare" = "$s" ] && return 0
+    done
+
+    # Only flags are worth warning about; bare values (a model name, a prompt)
+    # are the operands of a flag we have already seen.
+    case "$arg" in
+        -*) warn "Unrecognized claude.args value '$arg' — allowing, but review it." ;;
+    esac
+}
+
+# Prefix-matched: the path itself or anything beneath it. Prefix is required
+# so ~/.ssh/id_rsa is caught, not just the directory. /run and /var/run are
+# listed here (in addition to the containment check in validate_mount) because
+# they hold more than the Docker socket — other runtime sockets and PIDs a
+# committed config has no legitimate reason to reach into. $HOME/.claude and
+# $HOME/.claude.json are the host user's Claude Code OAuth credentials and
+# trust state (.claude.json is a SIBLING file, not a child of .claude, so it
+# needs its own entry — a prefix match on .claude alone does not cover it).
+# /root and /var/lib/docker cover every other sandbox's credential volume plus
+# all image layers. $HOME/.colima, $HOME/.orbstack, and $HOME/.lima are those
+# three Docker runtimes' own data directories (each holds that runtime's
+# docker.sock, among other things), listed here BY NAME rather than relying
+# on discovering which socket is active: _docker_socket_path's ancestor check
+# (see validate_mount) only ever sees DOCKER_HOST, and all three are at least
+# as commonly configured via `docker context use …`, which docker reads from
+# ~/.docker/config.json and leaves DOCKER_HOST unset entirely — invisible to
+# that check no matter how deep the ancestor walk goes. These three entries
+# close that gap independently of how the socket is discovered.
+#
+# These entries are themselves resolved through resolve_host_path before
+# comparison now (see _resolve_mount_policy) — the raw literals below are the
+# INPUT to that resolution, not what a mount is actually compared against.
+# /private/etc and /private/var/run used to be listed here separately as
+# hand-added instance-patches for macOS, where /etc and /var/run are symlinks
+# into /private: a mount resolved to its physical /private/... path but the
+# policy side was compared unresolved, so only an entry spelled the resolved
+# way could ever match. Now that the policy side resolves too, /etc and
+# /var/run resolve to /private/etc and /private/var/run there as well, so
+# those two entries were REMOVED as redundant rather than kept.
+mount_sensitive_prefixes() {
+    printf '%s\n' \
+        "$HOME/.ssh" "$HOME/.aws" "$HOME/.gnupg" "$HOME/.kube" \
+        "$HOME/.config/gcloud" "$HOME/.docker" "$HOME/.claude" "$HOME/.claude.json" \
+        "$HOME/.colima" "$HOME/.orbstack" "$HOME/.lima" \
+        /etc /usr /boot /proc /sys /run /var/run /root /var/lib/docker
+}
+
+# Exact-matched ONLY, and this is not interchangeable with the list above.
+# Prefix-matching $HOME would refuse every mount under the home directory —
+# including the default $(pwd):/workspace for any project living there, which
+# is nearly all of them. Prefix-matching / would refuse every mount that exists.
+# /home is the same trap: prefix-matching it would match /home/<you>/anything
+# and refuse essentially every mount on Linux, so it is exact-match only too.
+mount_sensitive_exact() {
+    printf '%s\n' "$HOME" / /home
+}
+
+# Absolute physical path without realpath, which a stock macOS does not have.
+#
+# Returns 0 with the resolved absolute path on stdout — or returns NON-ZERO,
+# with output that MUST NOT be trusted, whenever the path could not be fully
+# resolved: a component that EXISTS but cannot be traversed (EACCES on a
+# `cd`, or on the lookup a `readlink` needs), or — in the extremely unlikely
+# case that no ancestor at all can be found — a walk that exhausts itself at
+# "/". A component that simply does not exist YET is not a resolution
+# failure: the caller re-runs the same '..'/colon/'//' checks on whatever
+# this function returns, so walking up to the nearest existing, enterable
+# ancestor and reattaching the untouched missing suffix is safe, and matches
+# Docker's own behavior of auto-creating missing intermediate directories at
+# mount time.
+#
+# The EACCES distinction did not always exist: every "can't resolve" branch
+# used to fall back to printing the caller's raw, unresolved string as if it had
+# succeeded. A raw string carries none of the shapes the checks downstream
+# look for (no ':', no "..", no "//"), so it sailed through every one of
+# them — most sharply through a symlink whose PARENT directory is unreadable
+# (chmod 000, or simply a directory the invoking user does not own): the
+# symlink's own lstat needs search permission on that same parent, so it
+# could never even be followed, and control fell straight through to the
+# dirname+basename branch below, which used to hand back the unresolved
+# input as if it were an ordinary, already-checked path. Every caller MUST
+# check this function's exit status —
+#   if ! path=$(resolve_host_path "$raw"); then ... refuse ...; fi
+# — and refuse rather than mount anything it returns on failure. (`exit`
+# cannot do that job from inside this function: it runs inside the caller's
+# command substitution, i.e. a subshell, where `exit` only kills the
+# subshell — the enclosing `set -e` never sees it. The command
+# substitution's own exit STATUS is what propagates, which is why `return 1`
+# here plus `if ! path=$(...)` at the call site is the mechanism that works.)
+resolve_host_path() {
+    local p="$1" dir base hops=0 t result
+    p="${p/#\~/$HOME}"
+    # [ -d ] follows a symlink to a directory, but a symlink to a file,
+    # socket, or fifo falls through to the branch below, which resolves only
+    # the parent and appends the symlink's own basename verbatim. Docker
+    # resolves the symlink at mount time, so failing to do the same here lets
+    # a committed symlink point anywhere on the host — including at the
+    # Docker socket, or at a file like ~/.ssh/id_rsa — with no warning at
+    # all. Follow it ourselves first, bounded so a symlink loop can't hang
+    # the CLI. Plain `readlink` (not `-f`), since a stock macOS lacks that.
+    # A symlink target is caller-controlled the same way the original path
+    # is (both come from a committed sandbox.yaml or a committed symlink in
+    # the same repo), so this loop can hand branches below a target string
+    # containing "//", never re-derive it purely from the ORIGINAL input.
+    # `--` on readlink/dirname stops a host: value beginning with "-" from
+    # being parsed as an option instead of a path.
+    while [ -L "$p" ] && [ "$hops" -lt 40 ]; do
+        t=$(readlink -- "$p") || return 1
+        case "$t" in /*) p="$t" ;; *) p="$(dirname -- "$p")/$t" ;; esac
+        hops=$((hops + 1))
+    done
+    if [ -L "$p" ]; then
+        # Hop cap hit mid-chain: $p is still an unresolved symlink. Return it
+        # as-is rather than guessing — validate_mount (never this function;
+        # see the comment on its own -L check for why) refuses on sight of a
+        # still-symlinked result instead of treating it as a plain path. This
+        # is a SUCCESSFUL return: the caller's own -L check is the mechanism
+        # that refuses it, not this function's failure channel.
+        printf '%s\n' "$p"
+        return 0
+    fi
+    if [ -d "$p" ]; then
+        # A `cd` failure here means $p exists and IS a directory but cannot
+        # be entered (mode 000, or owned by someone else) — every bit as
+        # unresolved as a path that does not exist, so it must fail the same
+        # way, never fall back to the raw, unresolved $p.
+        result="$(cd -- "$p" 2>/dev/null && pwd -P)" || return 1
+    else
+        dir=$(dirname -- "$p"); base=$(basename -- "$p")
+        if [ -d "$dir" ]; then
+            # The legitimate "does not exist yet" case lives here: $p itself
+            # has no entry, but its parent does and IS a directory — resolve
+            # the parent and reattach the leaf's own name. If the parent
+            # exists but cannot be entered, `cd` fails here exactly as above
+            # and must fail the same way: this branch's old silent fallback
+            # to the unresolved `$dir` is precisely what a chmod-000 parent
+            # with a symlink inside it exploited, since that symlink could
+            # not even be detected as a symlink (its lstat needed search
+            # permission on this same directory) and control landed here.
+            result="$(cd -- "$dir" 2>/dev/null && pwd -P)" || return 1
+            result="$result/$base"
+        else
+            # The parent does not exist either (more than one path
+            # component is missing) — Docker auto-creates every missing
+            # intermediate directory at mount time, root-owned, exactly as
+            # it always has for a single missing leaf (the branch above),
+            # so failing here was a wrong diagnosis, not a real security
+            # concern: walk UP to the nearest EXISTING, enterable ancestor
+            # instead of refusing outright, and reattach the missing suffix
+            # untouched.
+            #
+            # A '.' or '..' pathname component must NEVER end up inside
+            # that untouched suffix: unlike a plain missing name, what '..'
+            # actually MEANS depends on the directory that would contain
+            # it — which, by construction, does not exist here either (if
+            # it did, `cd`/`pwd -P` above would have resolved it physically
+            # already, exactly like the P_TRAV case where every component
+            # along /usr/share/../../etc exists and `cd` collapses it for
+            # real). A component this walk cannot verify to exist is
+            # refused rather than reattached literally — this is what keeps
+            # /nope/../etc refused (P_TRAV2): "nope" doesn't exist, so its
+            # own "..". is unresolvable, and reattaching it as bare text
+            # would reopen exactly the unresolved-".." bypass Round 5's
+            # fail-closed rewrite eliminated (there is no longer a separate
+            # dedicated ".." check downstream in validate_mount — this is
+            # the one guarantee standing in for it).
+            case "$base" in .|..) return 1 ;; esac
+            local anc="$dir" suffix="$base" name
+            while [ "$anc" != "/" ]; do
+                # The directory check must run FIRST: a component that IS a
+                # directory must break the walk before the exists-or-symlink
+                # check below ever runs, exactly as before.
+                [ -d "$anc" ] && break
+                # An ancestor that exists but is not a directory (e.g. a
+                # plain file blocking the path) can never be walked past —
+                # this is a broken path, not simply "doesn't exist yet." A
+                # DANGLING symlink (one whose target does not exist) is the
+                # same class of broken path, but `-e` FOLLOWS symlinks and
+                # is false for one whose target is missing, so it slipped
+                # past this check entirely and fell through to the
+                # reattach-as-literal-text branch below — a mount source
+                # like ".../hop/data", where "hop" is a symlink to
+                # $HOME/.ssh/stolen that doesn't exist yet, resolved
+                # "successfully" instead of refusing, and Docker itself
+                # follows symlinks at mount time and auto-creates a missing
+                # target as a real directory — silently escaping through
+                # the symlink's real target with none of the checks above
+                # ever seeing it. `-L` catches it: a dangling symlink is
+                # true for `-L` even though `-e` is false for it.
+                if [ -e "$anc" ] || [ -L "$anc" ]; then
+                    return 1
+                fi
+                name="$(basename -- "$anc")"
+                case "$name" in .|..) return 1 ;; esac
+                suffix="$name/$suffix"
+                anc="$(dirname -- "$anc")"
+            done
+            if [ ! -d "$anc" ]; then
+                # Walked all the way to "/" without finding an existing,
+                # enterable directory — nothing here can be verified
+                # against anything, so refuse exactly as before.
+                return 1
+            fi
+            # The nearest existing ancestor EXISTS but may not be enterable
+            # (EACCES) — that must still fail CLOSED, exactly like every
+            # other unresolvable case in this function.
+            result="$(cd -- "$anc" 2>/dev/null && pwd -P)" || return 1
+            result="$result/$suffix"
+        fi
+    fi
+    # A leading "//" is POSIX-implementation-defined, and bash PRESERVES it
+    # through `pwd -P` (three or more leading slashes collapse on their own;
+    # exactly two do not). Collapsing this on the INPUT is not enough: the
+    # symlink loop above can turn a perfectly ordinary input into a result
+    # starting with "//" (a symlink whose target IS "//etc", or one whose
+    # target is "//"), and the dirname+basename join two branches up can
+    # itself produce "//leaf" when dir resolves to "/" (dir="/" + "/" +
+    # base). Collapse once, here, on the actual output, so every path this
+    # function can produce — direct, symlink target, or dirname+basename
+    # join, on Linux or on macOS where /etc and /var/run are themselves
+    # symlinks into /private — gets the same normalization before anything
+    # compares it or mounts it.
+    while [ "${result#//}" != "$result" ]; do result="${result#/}"; done
+    # A trailing "/" would let a resolved path differ from an exact-match
+    # sensitive-list entry (e.g. "$HOME/" vs "$HOME") by nothing but that
+    # slash — mount_sensitive_exact compares with plain `=`. The
+    # dirname+basename join above is the one branch that can produce one on
+    # its own (an empty $base, from a caller-supplied path like "" or one
+    # ending in "/"), but stripping it here, on every path this function can
+    # produce rather than only that branch, means no future branch can
+    # reintroduce the same gap unnoticed. "/" itself is the one value this
+    # must not touch — stripping its own trailing slash would empty it.
+    if [ "$result" != "/" ]; then
+        result="${result%/}"
+    fi
+    printf '%s\n' "$result"
+}
+
+_mount_refuse_sensitive() {
+    local raw="$1" rule="$2"
+    if [ "${SANDBOX_ALLOW_UNSAFE_MOUNTS:-0}" = "1" ]; then
+        warn "SANDBOX_ALLOW_UNSAFE_MOUNTS=1 — mounting sensitive path '$raw' (matched $rule)."
+        return 0
+    fi
+    error "Refusing to mount sensitive path '$raw' (matched $rule) from $CONFIG_FILE."
+    error "Set SANDBOX_ALLOW_UNSAFE_MOUNTS=1 to override if this project genuinely needs it."
+    exit 1
+}
+
+# Cached, resolved once per invocation (not once per mount): MOUNT_SENSITIVE_*
+# below are globals populated the first time _resolve_mount_policy runs, and
+# every later call in the same process reuses them rather than re-resolving.
+MOUNT_SENSITIVE_EXACT_RESOLVED=()
+MOUNT_SENSITIVE_PREFIXES_RESOLVED=()
+_MOUNT_POLICY_RESOLVED=0
+
+# The comparison in validate_mount is `$path` (always a resolve_host_path
+# output — i.e. `pwd -P` physical form) against the deny lists above, which
+# used to be compared as raw literals. Wherever resolving a deny entry
+# changes it — a symlinked $HOME/.ssh from an ordinary stow/chezmoi/yadm
+# dotfiles setup, or /etc on macOS where it is itself a symlink into
+# /private — that entry was DEAD: nothing reaching the comparison could ever
+# equal the unresolved literal, because everything on the other side is
+# canonical. This resolves each entry through the exact same function, once,
+# so the comparison becomes canonical-to-canonical on both sides.
+#
+# An entry that fails to resolve (e.g. /boot on a machine that has none, or a
+# directory the invoking user cannot even traverse — /root is commonly mode
+# 700 and unreadable by a non-root caller) is DROPPED, not fatal: a missing or
+# inaccessible deny entry must not make sandbox unusable. This creates no gap
+# — if resolve_host_path cannot resolve a policy entry for existence or
+# permission reasons, it cannot resolve that SAME path as a mount target
+# either, and validate_mount already refuses any mount whose own resolution
+# fails (see the "its real path could not be determined" check above).
+_resolve_mount_policy() {
+    [ "$_MOUNT_POLICY_RESOLVED" = "1" ] && return 0
+    _MOUNT_POLICY_RESOLVED=1
+
+    local raw resolved
+    MOUNT_SENSITIVE_EXACT_RESOLVED=()
+    while IFS= read -r raw; do
+        if resolved=$(resolve_host_path "$raw"); then
+            MOUNT_SENSITIVE_EXACT_RESOLVED+=("$resolved")
+        fi
+    done < <(mount_sensitive_exact)
+
+    MOUNT_SENSITIVE_PREFIXES_RESOLVED=()
+    while IFS= read -r raw; do
+        if resolved=$(resolve_host_path "$raw"); then
+            MOUNT_SENSITIVE_PREFIXES_RESOLVED+=("$resolved")
+        fi
+    done < <(mount_sensitive_prefixes)
+
+    # A wholesale failure here (every entry in a list failing to resolve)
+    # would otherwise fail OPEN: the comparison loops in validate_mount
+    # iterate these arrays with a plain `for`, and iterating an empty array
+    # is zero iterations, not an error — so every mount would silently sail
+    # past both deny lists for the rest of this invocation (the result is
+    # cached, so a transient failure here now latches for the whole
+    # invocation instead of being retried per mount, unlike before this
+    # cache existed). Unreachable today (/ and /etc always resolve), but
+    # this must still fail CLOSED rather than open. `${#ARR[@]}` (not
+    # `"${ARR[@]}"`) is deliberate: bash before 4.4 errors under `set -u`
+    # when expanding an EMPTY array's contents, which is exactly the
+    # failure this guard exists to catch — the length form never has that
+    # problem.
+    if [ ${#MOUNT_SENSITIVE_EXACT_RESOLVED[@]} -eq 0 ] || [ ${#MOUNT_SENSITIVE_PREFIXES_RESOLVED[@]} -eq 0 ]; then
+        error "Internal error: the mount deny policy resolved to nothing. Refusing all mounts."
+        exit 1
+    fi
+}
+
+# Resolves the Docker socket path this invocation would actually use —
+# respecting DOCKER_HOST exactly as docker itself does, so Colima
+# (~/.colima/default/docker.sock), OrbStack (~/.orbstack/run/docker.sock),
+# Lima (~/.lima/<vm>/sock/docker.sock), and any other non-default
+# DOCKER_HOST are all covered, not just the plain-Linux default. Falls back
+# to the unresolved path if resolution fails (e.g. the socket does not exist
+# yet, or a parent is unreadable) — the caller still gets a best-effort
+# string to compare against rather than nothing, and a mount that cannot
+# resolve at all is refused earlier in validate_mount regardless.
+_docker_socket_path() {
+    local s="${DOCKER_HOST:-}"
+    case "$s" in
+        unix://*) s="${s#unix://}" ;;
+        *)        s="/var/run/docker.sock" ;;
+    esac
+    resolve_host_path "$s" 2>/dev/null || printf '%s\n' "$s"
+}
+
+validate_mount() {
+    local raw="$1" path s trimmed sock
+
+    # An empty or whitespace-only host: has no legitimate meaning — there is
+    # no default to fall back to for a mount entry. Left unchecked, it drives
+    # resolve_host_path's dirname+basename branch with an empty leaf, which
+    # resolves to CWD (or the project directory) plus a trailing "/" that
+    # used to defeat mount_sensitive_exact's plain `=` comparison against
+    # "$HOME" (see the trailing-slash strip inside resolve_host_path — this
+    # check and that one are the two-part fix for the same bypass; refusing
+    # here is the belt, stripping the slash there is the suspenders).
+    trimmed="${raw#"${raw%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [ -z "$trimmed" ]; then
+        error "Refusing mount from $CONFIG_FILE — its host: value is empty or whitespace-only."
+        error "Every mount needs an explicit host path."
+        exit 1
+    fi
+
+    # docker's `-v src:dst:opts` grammar splits on ':', and a ':' inside the
+    # host path lets the config's `container:` value become the OPTIONS
+    # field instead of the destination — e.g. host: "/:/hostroot" with
+    # container: "ro" emits `-v /:/hostroot:ro`, mounting the entire host
+    # filesystem read-only with no override. A newline or CR is the same
+    # class of problem one field over: it can inject a second -v-shaped
+    # token. None of this is representable in the -v grammar anyway, so
+    # refusing is strictly correct and breaks no legitimate mount.
+    case "$raw" in
+        *:*|*$'\n'*|*$'\r'*)
+            error "Refusing mount '$raw' from $CONFIG_FILE — the host path contains a ':' or a newline."
+            error "Those characters split the docker -v specification and cannot appear in a mount path."
+            exit 1 ;;
+    esac
+
+    # resolve_host_path returns non-zero, with output that must not be
+    # trusted, whenever it could not fully resolve $raw to an absolute path —
+    # an unreadable/non-traversable parent (EACCES on a `cd`), an
+    # unresolvable ".." (an ancestor that does not exist, so what ".."
+    # inside it would even mean can't be verified), or a non-directory or
+    # dangling-symlink component blocking the path — not just a leaf that
+    # does not exist yet. Before this check existed, every such failure fell
+    # back to the function's caller-supplied RAW string, which carries none
+    # of the shapes the checks below look for (no ':', no "..", no "//") and
+    # so sailed straight through them — this is how a symlink behind a
+    # chmod-000 directory (undetectable as a symlink at all, since even
+    # lstat needs search permission on that directory) bypassed every one of
+    # those checks and reached the docker invocation unexamined. `if !
+    # path=$(...)` is what makes this refusal actually work: resolve_host_path
+    # runs inside this command substitution, i.e. a subshell, so
+    # `set -e`/`exit` inside IT cannot abort the script — only the command
+    # substitution's own exit STATUS propagates out, and this is the form
+    # that checks it.
+    if ! path=$(resolve_host_path "$raw"); then
+        error "Refusing mount '$raw' from $CONFIG_FILE — its real path could not be determined."
+        error "A parent directory may be unreadable, contain an unresolvable '..', or include a"
+        error "non-directory or dangling-symlink component."
+        exit 1
+    fi
+
+    # resolve_host_path's readlink loop is bounded at 40 hops so a symlink
+    # cycle can't hang the CLI, but a chain LONGER than that must fail
+    # CLOSED, not open: if $path is still a symlink here, the loop stopped
+    # mid-chain and handed back an unresolved link, not a real path. This
+    # check cannot live inside resolve_host_path itself — that function is
+    # invoked in a command substitution ($( )), and `exit` inside a command
+    # substitution only kills the subshell the substitution runs in, so a
+    # refusal there would be silently swallowed and the (still-unresolved)
+    # output would flow right through to the caller. Only a check out here,
+    # in validate_mount's own process, can actually halt the CLI.
+    if [ -L "$path" ]; then
+        error "Refusing mount '$raw' from $CONFIG_FILE — symlink chain too deep to resolve."
+        error "Mount the target directly instead."
+        exit 1
+    fi
+
+    # The readlink loop inside resolve_host_path can turn a raw value that
+    # contained neither ':' nor a newline (e.g. a bare relative path like
+    # "./evil") into a resolved path that DOES — by following a symlink
+    # whose TARGET contains one. The $raw check above never sees that,
+    # because it runs before resolution. Re-run the identical check here, on
+    # the string that will actually be compared and mounted; keep the $raw
+    # check too; both are needed; $raw's checks that never reach and
+    # $path's checks what resolution actually produced.
+    case "$path" in
+        *:*|*$'\n'*|*$'\r'*)
+            error "Refusing mount '$raw' from $CONFIG_FILE — its resolved path contains a ':' or a newline."
+            error "That path is reached through a symlink whose target contains one of those characters,"
+            error "which splits the docker -v specification just as effectively as if '$raw' had."
+            exit 1 ;;
+    esac
+
+    # Published for the caller to build the actual -v spec from: the STRING
+    # THAT WAS CHECKED, not a path resolved a second time at the build site.
+    # Calling resolve_host_path again there would re-run the symlink-follow
+    # loop independently — on a TOCTOU-mutated symlink, or just by a future
+    # edit accidentally diverging the two call sites, the mounted path could
+    # stop being the path every check above actually validated.
+    VALIDATED_MOUNT_PATH="$path"
+
+    # There is deliberately no dedicated ".." check here any more. It used
+    # to exist because resolve_host_path would fall back to the caller's
+    # raw, unresolved string whenever a component did not exist (e.g.
+    # /nope/../etc, where /nope itself does not exist) — Docker cleans such
+    # a path lexically at mount time, landing on the host's real /etc even
+    # though nothing along /nope/../etc actually resolves. That fallback is
+    # gone: resolve_host_path now returns non-zero for exactly this case,
+    # caught above before $path is ever set, and every path that reaches
+    # this point came from `pwd -P` on a directory that DID successfully
+    # `cd` — which is guaranteed to contain no "." or ".." component. A raw,
+    # unresolved path (with or without "..") can no longer reach here.
+
+    # The Docker socket is a full host escape. sandbox-env ships no sudo and
+    # already blocks DOCKER_HOST from reaching the CONTAINER's environment, so
+    # there is no legitimate case to preserve and therefore no override. Three
+    # independent checks close this, only two of which live here:
+    #
+    # 1. Ancestor-aware, any depth: resolve the socket THIS invocation would
+    #    actually use (_docker_socket_path — respects the HOST's own
+    #    DOCKER_HOST, exactly as docker itself does) and refuse if the mount
+    #    path IS that socket, or is an ancestor of it at any depth. This
+    #    covers Colima (~/.colima/default/docker.sock), OrbStack
+    #    (~/.orbstack/run/docker.sock), and Lima (~/.lima/<vm>/sock/docker.sock)
+    #    when DOCKER_HOST is exported to name one of them — but ONLY then:
+    #    all three are at least as commonly selected via
+    #    `docker context use …`, which docker reads from
+    #    ~/.docker/config.json and leaves DOCKER_HOST unset, so this check
+    #    cannot see that case at all. The $HOME/.colima, $HOME/.orbstack, and
+    #    $HOME/.lima entries in mount_sensitive_prefixes are the independent
+    #    third check that closes that gap: they deny by NAME, not by
+    #    resolving which socket is currently in use, so they fire regardless
+    #    of how (or whether) DOCKER_HOST is set.
+    # 2. Depth-1 + basename (kept): still catches a stray docker.sock sitting
+    #    in a mounted directory that is NOT the socket actually in use —
+    #    e.g. a second daemon's socket, or a decoy — which the ancestor
+    #    check above cannot see since it only follows the one socket path
+    #    DOCKER_HOST (or the default) names.
+    sock=$(_docker_socket_path)
+    if [ "$path" = "$sock" ] || [ "${sock#"$path"/}" != "$sock" ]; then
+        error "Refusing to mount '$raw' from $CONFIG_FILE — it is, or contains, the Docker socket ($sock)."
+        error "That grants full control of the host daemon. There is no override."
+        exit 1
+    fi
+    if [ -e "$path/docker.sock" ] || [ "$(basename -- "$path")" = "docker.sock" ]; then
+        error "Refusing to mount '$raw' from $CONFIG_FILE — it is, or contains, the Docker socket."
+        error "That grants full control of the host daemon. There is no override."
+        exit 1
+    fi
+
+    # Both deny lists are resolved through resolve_host_path before this
+    # point (see _resolve_mount_policy, cached on first call) so $path — also
+    # a resolve_host_path output — is compared canonical-to-canonical, not
+    # against raw literals a symlinked entry (or a macOS /private symlink)
+    # could never equal.
+    _resolve_mount_policy
+
+    for s in "${MOUNT_SENSITIVE_EXACT_RESOLVED[@]}"; do
+        [ "$path" = "$s" ] && _mount_refuse_sensitive "$raw" "$s"
+    done
+
+    for s in "${MOUNT_SENSITIVE_PREFIXES_RESOLVED[@]}"; do
+        # The trailing slash makes the prefix boundary-aware: /etc must not
+        # match /etcetera.
+        if [ "$path" = "$s" ] || [ "${path#"$s"/}" != "$path" ]; then
+            _mount_refuse_sensitive "$raw" "$s"
+        fi
+    done
+
+    [ -e "$path" ] || warn "Mount source '$raw' does not exist; Docker will create it root-owned."
 }
 
 # ── sparkyard backend ────────────────────────────────────────────────
@@ -561,12 +1173,7 @@ _read_claude_config() {
     CLAUDE_EXTRA_ARGS=()
     while IFS= read -r arg; do
         [ -z "$arg" ] && continue
-        case "$arg" in
-            --dangerously-skip-permissions|--no-sandbox)
-                warn "Blocked dangerous claude.args value: '$arg' — use claude.skip_permissions instead"
-                continue
-                ;;
-        esac
+        validate_claude_arg "$arg"
         CLAUDE_EXTRA_ARGS+=("$arg")
     done < <(config_get '.claude.args[]')
 
@@ -610,30 +1217,271 @@ _build_docker_args() {
         DOCKER_ARGS+=("-v" "sandbox-ollama-models:/home/node/.ollama")
     fi
 
+    # Absolute physical path of the config file, computed ONCE, here, before
+    # the mounts loop below. No realpath (a stock macOS lacks it) — `cd ...
+    # && pwd -P` is the same idiom resolve_host_path itself uses. $CONFIG_FILE
+    # is always a relative name (e.g. "sandbox.yaml") as set by find_config.
+    # Needed this early because the mounts loop below has to compare each
+    # mount's OWN resolved source against this value (see the "force
+    # read-only" comment inside the loop) — not just the config-overlay step
+    # at the end of this function, which reuses this same value again.
+    local cfg_abs
+    cfg_abs="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd -P)/$(basename -- "$CONFIG_FILE")"
+
     # Mounts
+    # bind_mount_hosts/bind_mount_containers record every BIND mount (never a
+    # named volume) actually added below, for the config-overlay step at the
+    # end of this function to search for an ancestor of $CONFIG_FILE.
+    local bind_mount_hosts=()
+    local bind_mount_containers=()
     local has_mounts=false
     local mount_count
     mount_count=$(yq '.mounts | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
     if [ "$mount_count" != "null" ] && [ "$mount_count" -gt 0 ] 2>/dev/null; then
         for i in $(seq 0 $((mount_count - 1))); do
             has_mounts=true
-            local host_path container_path readonly_flag
+            local host_path container_path readonly_flag mount_spec mount_is_bind=false
             host_path=$(yq -r ".mounts[$i].host" "$CONFIG_FILE")
             container_path=$(yq -r ".mounts[$i].container" "$CONFIG_FILE")
             readonly_flag=$(yq -r ".mounts[$i].readonly // false" "$CONFIG_FILE")
-            host_path="${host_path/#\~/$HOME}"
-            if [[ "$host_path" == .* ]]; then
-                host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
+            # A missing host:/container: key yields yq's literal "null"
+            # string (same as config_get's identical check above), not an
+            # actually-empty value — a missing host: used to resolve
+            # against CWD and bind-mount a root-owned "$CWD/null". An
+            # EXPLICIT host: "" is a different, pre-existing case (caught
+            # below by validate_mount's own empty/whitespace check) and
+            # must not be caught here.
+            if [ "$host_path" = "null" ] || [ "$container_path" = "null" ]; then
+                error "mounts[$i] in $CONFIG_FILE is missing host:/container:"
+                exit 1
             fi
-            local mount_spec="${host_path}:${container_path}"
-            if [ "$readonly_flag" = "true" ]; then
-                mount_spec="${mount_spec}:ro"
+            # Same class of bug as the host-side check in validate_mount: a
+            # ':' or newline in the container path shifts the -v spec's
+            # OPTIONS field just as effectively as one in the host path does.
+            # Applies to BOTH branches below.
+            case "$container_path" in
+                *:*|*$'\n'*|*$'\r'*)
+                    error "Refusing mount container path '$container_path' from $CONFIG_FILE — it contains a ':' or a newline."
+                    error "Those characters split the docker -v specification and cannot appear in a mount path."
+                    exit 1 ;;
+            esac
+            if [ -z "${host_path//[[:space:]]/}" ]; then
+                # Blank/whitespace-only is not a valid named-volume name
+                # either (nor does it start with '/', '.', or '~') — route
+                # it through the SAME resolve+validate_mount call as the
+                # branch below so validate_mount's own, more specific
+                # blank/whitespace check produces its existing message,
+                # unchanged from before this fix existed.
+                validate_mount "$host_path"
+                # UNREACHABLE today: validate_mount always exit 1's on a
+                # blank/whitespace-only host: before ever returning control
+                # here (see its own check, at the top of its body). This
+                # explicit exit — rather than falling through to build
+                # mount_spec from VALIDATED_MOUNT_PATH — is deliberate: if
+                # that check is ever loosened without ALSO teaching this
+                # branch what a blank host: should mean, the alternative was
+                # silently consuming whichever mount validated LAST in a
+                # PREVIOUS loop iteration (the exact stale-global trap the
+                # named-volume branch below has its own comment about), not
+                # a loud, obvious failure right here.
+                error "Internal error: blank/whitespace-only host: reached past validate_mount."
+                exit 1
+            else
+                case "$host_path" in
+                    *:*|*$'\n'*|*$'\r'*)
+                        # The colon/newline refusal stays FIRST and applies
+                        # to BOTH branches below: validate_mount re-checks
+                        # this on the resolved path for the resolve-as-
+                        # real-path branch, but the named-volume branch
+                        # never calls validate_mount at all, so this raw
+                        # check is the only one that ever sees it there.
+                        error "Refusing mount '$host_path' from $CONFIG_FILE — the host path contains a ':' or a newline."
+                        error "Those characters split the docker -v specification and cannot appear in a mount path."
+                        exit 1 ;;
+                    /*|.*|~*)
+                        host_path="${host_path/#\~/$HOME}"
+                        if [[ "$host_path" == .* ]]; then
+                            host_path="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(echo "$host_path" | sed 's|^\./||')"
+                        fi
+                        validate_mount "$host_path"
+                        # Mount what was validated, not a path resolved a
+                        # second time: build the -v spec from
+                        # VALIDATED_MOUNT_PATH, the exact string
+                        # validate_mount just finished checking
+                        # (colon/newline, symlink depth, traversal, socket,
+                        # and sensitive-path tiers all ran against precisely
+                        # this string). Calling resolve_host_path again here
+                        # would re-run its own symlink-follow loop
+                        # independently of validate_mount's — on a
+                        # TOCTOU-mutated symlink, or after a future edit
+                        # accidentally lets the two calls diverge, the
+                        # mounted path could stop being the path that was
+                        # actually checked. There is exactly one call to
+                        # resolve_host_path per mount now, inside
+                        # validate_mount.
+                        mount_spec="${VALIDATED_MOUNT_PATH}:${container_path}"
+                        mount_is_bind=true
+                        ;;
+                    *)
+                        # A bare name is a Docker NAMED VOLUME, not a host
+                        # path: docker manages it, it cannot reach host
+                        # files, so host-path validation does not apply
+                        # (deliberate, owner-approved relaxation). The
+                        # regex is Docker's own volume-name convention.
+                        # Build the spec from the name itself — NEVER from
+                        # VALIDATED_MOUNT_PATH, which would hold a STALE
+                        # value from a PREVIOUS iteration of this same loop
+                        # whenever an earlier mount resolved a real path.
+                        if [[ ! "$host_path" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+                            error "Invalid mount source '$host_path' in $CONFIG_FILE."
+                            exit 1
+                        fi
+                        mount_spec="${host_path}:${container_path}"
+                        ;;
+                esac
             fi
+            if $mount_is_bind; then
+                bind_mount_hosts+=("$VALIDATED_MOUNT_PATH")
+                bind_mount_containers+=("$container_path")
+                # A mount whose SOURCE is the config file itself would
+                # otherwise get whatever readonly: the operator wrote for
+                # THIS mount (commonly unset, i.e. read-write) — defeating
+                # the config-tamper overlay below entirely, since the
+                # overlay loop deliberately leaves an explicit file-source
+                # mount alone rather than double-mounting the same
+                # destination (see its own comment). Force it read-only
+                # here instead, unless the escape hatch is set: the
+                # operator's explicit mount is still honoured — it stays a
+                # real mount, at its own destination — it is just never
+                # writable through THIS mount either. Guarded by
+                # $mount_is_bind so a named volume (whose VALIDATED_MOUNT_PATH
+                # would be stale, left over from a previous bind-mount
+                # iteration) can never be compared here at all.
+                if [ "$VALIDATED_MOUNT_PATH" = "$cfg_abs" ] && [ "${SANDBOX_ALLOW_WRITABLE_CONFIG:-0}" != "1" ]; then
+                    readonly_flag=true
+                fi
+            fi
+            # yq v4 preserves the source spelling of a YAML boolean, so
+            # readonly: True/yes/on failed a plain `= "true"` string compare
+            # and silently dropped :ro — a requested read-only mount became
+            # read-write. Recognize every common spelling explicitly; an
+            # unrecognized value fails SAFE (read-only), since the user
+            # expressed intent to restrict the mount at all.
+            case "$readonly_flag" in
+                true|True|TRUE|yes|Yes|YES|on|On|ON)
+                    mount_spec="${mount_spec}:ro" ;;
+                false|False|FALSE|no|No|NO|off|Off|OFF|null|"")
+                    : ;;
+                *)
+                    warn "Unrecognized readonly value '$readonly_flag' — treating the mount as read-only."
+                    mount_spec="${mount_spec}:ro" ;;
+            esac
             DOCKER_ARGS+=("-v" "$mount_spec")
         done
     fi
     if ! $has_mounts; then
         DOCKER_ARGS+=("-v" "$(pwd):/workspace")
+    fi
+
+    # ── Config tamper protection ──────────────────────────────────────────
+    # sandbox.yaml/.yml is committed and travels with the repo, but the
+    # branches above bind-mount the project root READ-WRITE — so a
+    # prompt-injected agent can edit it, and the operator's NEXT `sandbox run`
+    # picks up whatever the agent wrote (including a now-escalated
+    # container). Overlay a read-only file bind of the resolved config over
+    # every container path that exposes it: Docker sorts bind destinations by
+    # depth, so this file-level mount always wins over the enclosing
+    # directory mount, regardless of DOCKER_ARGS order. Reads still work —
+    # only writes, deletes, and renames are cut off (`:ro` refuses writes;
+    # the mountpoint itself cannot be unlinked, so `rm`/rename-over fail with
+    # EBUSY) — so the agent can see the config and PROPOSE changes; only the
+    # operator, on the host, can apply them.
+    #
+    # SANDBOX_ALLOW_WRITABLE_CONFIG=1 is a runner-side escape hatch only
+    # (mirrors SANDBOX_ALLOW_UNSAFE_MOUNTS): never a sandbox.yaml key, because
+    # the config must not be able to unprotect itself.
+    if [ "${SANDBOX_ALLOW_WRITABLE_CONFIG:-0}" = "1" ]; then
+        warn "SANDBOX_ALLOW_WRITABLE_CONFIG=1 — the agent can modify sandbox.yaml."
+    else
+        # $cfg_abs was already computed once, before the mounts loop above
+        # (the loop needs it too, to force a config-file-source mount
+        # read-only — see the comment there); reused here rather than
+        # resolved a second time.
+        #
+        # A colon/newline check on $cfg_abs is NOT done here, unconditionally
+        # for every invocation — a resolved path containing one only matters
+        # at the exact point an overlay -v spec is actually built from it
+        # (both overlay paths below splice it in verbatim as
+        # "${cfg_abs}:<target>:ro", and Docker's own resulting error, "too
+        # many colons", is opaque and gives no hint this feature is the
+        # cause). Checking it here instead would refuse a project for no
+        # reason connected to anything it configured, purely because it
+        # happens to be CHECKED OUT under a colon-containing path — even one
+        # whose custom mounts: never expose the config at all, which ran
+        # fine before this feature existed. So the check is duplicated at
+        # each of the two places below where an overlay is actually about to
+        # be emitted, guarding only that emission.
+        if ! $has_mounts; then
+            # Default branch: the config sits in $(pwd), mounted whole at
+            # /workspace — overlay it at its own name underneath that. An
+            # overlay is unconditionally emitted in this branch, so the
+            # colon/newline guard belongs right here.
+            case "$cfg_abs" in
+                *:*|*$'\n'*|*$'\r'*)
+                    error "Refusing to protect $CONFIG_FILE — its resolved path contains a ':' or a newline."
+                    error "That character would corrupt the docker -v specification for the read-only overlay."
+                    exit 1 ;;
+            esac
+            DOCKER_ARGS+=("-v" "${cfg_abs}:/workspace/$(basename -- "$CONFIG_FILE"):ro")
+        else
+            # Custom mounts: overlay onto every recorded BIND mount (never a
+            # named volume — bind_mount_hosts/bind_mount_containers only ever
+            # gained an entry from the two host-path branches above, never
+            # the bare-name/named-volume branch, so this loop cannot misfire
+            # onto one) whose resolved host path is a directory that is an
+            # ancestor of, or equal to, the config's own directory. A config
+            # exposed through several such mounts gets an overlay for each.
+            #
+            # A bind mount whose SOURCE is the config file itself (not a
+            # directory) fails the `[ -d ]` test below and is skipped in
+            # THIS loop — but it is not left writable: the mounts loop above
+            # already forced it read-only the moment it saw
+            # VALIDATED_MOUNT_PATH == cfg_abs (see the comment there), unless
+            # the escape hatch is set, in which case leaving it alone here
+            # too is correct. Either way, adding a second overlay at the
+            # same destination here would be a needless duplicate, never a
+            # missing protection.
+            local cfg_dir
+            cfg_dir="$(dirname -- "$cfg_abs")"
+            local nbind="${#bind_mount_hosts[@]}"
+            if [ "$nbind" -gt 0 ]; then
+                local bm_i
+                for bm_i in $(seq 0 $((nbind - 1))); do
+                    local bm_host="${bind_mount_hosts[$bm_i]}"
+                    local bm_container="${bind_mount_containers[$bm_i]}"
+                    [ -d "$bm_host" ] || continue
+                    # Boundary-aware ancestor-or-equal check, same idiom as
+                    # validate_mount's own sensitive-prefix comparison: $bm_host
+                    # itself, or anything one or more path components below it.
+                    if [ "$bm_host" = "$cfg_dir" ] || [ "${cfg_dir#"$bm_host"/}" != "$cfg_dir" ]; then
+                        # Same colon/newline guard as the default branch
+                        # above (see its comment), moved inside this `if` so
+                        # it only fires for a mount that ACTUALLY exposes
+                        # the config — never for an unrelated mount in a
+                        # colon-containing checkout whose config is never
+                        # reached by any mount at all.
+                        case "$cfg_abs" in
+                            *:*|*$'\n'*|*$'\r'*)
+                                error "Refusing to protect $CONFIG_FILE — its resolved path contains a ':' or a newline."
+                                error "That character would corrupt the docker -v specification for the read-only overlay."
+                                exit 1 ;;
+                        esac
+                        local bm_rel="${cfg_abs#"$bm_host"/}"
+                        DOCKER_ARGS+=("-v" "${cfg_abs}:${bm_container%/}/${bm_rel}:ro")
+                    fi
+                done
+            fi
+        fi
     fi
 
     # Env vars
@@ -650,8 +1498,15 @@ _build_docker_args() {
                 warn "Skipping dangerous env var '$key'"
                 continue ;;
         esac
+        validate_env_key "$key"
         local val
-        val=$(yq -r ".env.${key}" "$CONFIG_FILE")
+        # strenv() passes the key as DATA, so even if the regex above is ever
+        # loosened the key can never be evaluated as an expression.
+        # Null-only default: yq's `//` treats boolean false (and 0) as
+        # falsy too, so `env: {X: false}` used to export X= (empty) instead
+        # of X=false. `select(. != null)` filters only an actual null (a
+        # missing/explicit-null value) to empty, leaving false/0 intact.
+        val=$(key="$key" yq -r '.env[strenv(key)] | select(. != null)' "$CONFIG_FILE")
         DOCKER_ARGS+=("-e" "${key}=${val}")
     done <<< "$env_keys"
 
