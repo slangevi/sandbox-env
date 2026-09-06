@@ -131,7 +131,9 @@ file no matter what name it's given.
   directory (e.g. `/var/run`) is refused too, because it hands the container
   the same socket at a different path. A directory that merely contains a file
   named `docker.sock` for any other reason is refused the same way — mount a
-  subdirectory instead.
+  subdirectory instead. The socket's location is discovered from `DOCKER_HOST`
+  (defaulting to `/var/run/docker.sock`) — see the known limitation below for
+  daemons selected via `docker context`.
 - **A `..` path component that can't be resolved is always refused, with no
   override.** Docker cleans such paths up lexically when it builds the mount,
   so an unresolved traversal like `/nope/../etc` would otherwise reach the
@@ -157,7 +159,16 @@ file no matter what name it's given.
 Paths are resolved before matching, and the mount itself is built from that
 resolved path, so `../../.ssh` is caught too.
 
-Two things worth knowing that the checks above do **not** cover:
+Three things worth knowing that the checks above do **not** cover:
+
+- The no-override socket guarantee holds only for the daemon named by
+  `DOCKER_HOST`. If your daemon is selected via `docker context` instead
+  (common for rootless Docker at `/run/user/<uid>/docker.sock`, and for
+  Rancher Desktop's `~/.rd`), `DOCKER_HOST` is unset, discovery falls back to
+  `/var/run/docker.sock`, and the real socket is covered only by the
+  *overridable* tier above — or, for `~/.rd`, not listed at all. Export
+  `DOCKER_HOST` if you want the no-override guarantee on such a setup.
+  (Colima, OrbStack and Lima homes are on the overridable list by name.)
 
 - `host: /var` is allowed. On a system where `/var/run` is a real directory
   rather than a symlink to `/run`, that would expose the Docker socket the
