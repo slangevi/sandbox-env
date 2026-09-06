@@ -1060,6 +1060,12 @@ mk_cfgtrust_proj() {
 # own exit status) — confirmed empirically against this image before relying
 # on the exact code here.
 P_CFGWRITE=$(mk_cfgtrust_proj cfgtrust-write)
+# Throwaway fixture — world-writable so the refusal below is provably the
+# :ro overlay, not an incidental uid/permission mismatch (CI's ubuntu-latest
+# runner is uid 1001, the container's node user is uid 1000; verified live
+# that a uid-mismatched file can surface EACCES instead of EROFS while
+# STILL exiting 2 either way, which would silently stop proving :ro at all).
+chmod 666 "$P_CFGWRITE/sandbox.yaml"
 CFGWRITE_BEFORE=$(cat "$P_CFGWRITE/sandbox.yaml")
 check_status "in-container write to sandbox.yaml is refused (default mount)" 2 \
     run_cfg "$P_CFGWRITE" run -- sh -c 'echo x >> /workspace/sandbox.yaml'
@@ -1077,6 +1083,13 @@ fi
 # 2. Delete refused. A bind mountpoint cannot be unlinked; GNU coreutils rm
 # reports this as "Device or resource busy" (EBUSY) with exit 1.
 P_CFGDELETE=$(mk_cfgtrust_proj cfgtrust-delete)
+# Throwaway fixture — the DIRECTORY (not the file) must be world-writable:
+# unlink() permission is governed by the parent directory, not the target
+# file's own mode, so a uid-mismatched directory (CI's uid 1001 runner vs
+# the container's uid-1000 node) makes rm fail with EACCES on the directory
+# before ever reaching the mountpoint — masking the EBUSY the overlay is
+# meant to prove instead of merely coinciding with it. Verified live.
+chmod 777 "$P_CFGDELETE"
 check_status "in-container delete of sandbox.yaml is refused (default mount)" 1 \
     run_cfg "$P_CFGDELETE" run -- sh -c 'rm /workspace/sandbox.yaml'
 if [ -f "$P_CFGDELETE/sandbox.yaml" ]; then
@@ -1110,6 +1123,11 @@ mk_cfgtrust_custom_proj() {
     echo "$dir"
 }
 P_CFGCUSTOM_W=$(mk_cfgtrust_custom_proj cfgtrust-custom-write)
+# Throwaway fixture — world-writable for the same reason as P_CFGWRITE
+# above: the refusal must be provably the :ro overlay, not an incidental
+# uid mismatch between the CI runner (uid 1001) and the container's node
+# user (uid 1000).
+chmod 666 "$P_CFGCUSTOM_W/sandbox.yaml"
 check_status "in-container write through a custom mount is refused (custom mount)" 2 \
     run_cfg "$P_CFGCUSTOM_W" run -- sh -c 'echo x >> /app/sandbox.yaml'
 
@@ -1123,6 +1141,7 @@ check_output "the overlay targets the custom mount's own destination" \
 # 5. Escape hatch: SANDBOX_ALLOW_WRITABLE_CONFIG=1 skips the overlay
 # entirely, with a warning. A fixture copy only — never the repo's own files.
 P_CFGESCAPE=$(mk_cfgtrust_proj cfgtrust-escape)
+chmod 666 "$P_CFGESCAPE/sandbox.yaml"   # throwaway fixture — CI runs uid 1001, container node is 1000
 check_output "the escape hatch prints its warning" \
     "SANDBOX_ALLOW_WRITABLE_CONFIG=1" \
     env SANDBOX_ALLOW_WRITABLE_CONFIG=1 bash -c "cd '$P_CFGESCAPE' && '$SANDBOX' run -- true"
@@ -1195,6 +1214,11 @@ mounts:
     container: /escape/cfg.yaml
 YAML
 docker image tag sandbox-base:latest sandbox-cfgtrust-selfmount:latest >/dev/null 2>&1
+# Throwaway fixture — world-writable so the write-refusal check below (this
+# mount is forced read-only by the mounts loop, not the overlay loop) is
+# provably that :ro, not an incidental uid mismatch between the CI runner
+# (uid 1001) and the container's node user (uid 1000).
+chmod 666 "$P_CFGSELFMOUNT/sandbox.yaml"
 check_output "a mount whose source is the config file itself is forced read-only" \
     ":/escape/cfg.yaml:ro" \
     run_cfg_trace "$P_CFGSELFMOUNT" run -- true
