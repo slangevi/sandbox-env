@@ -23,6 +23,7 @@ tests/test-headless.sh         # Headless mode and output capture
 tests/test-commands.sh         # Convenience commands (claude, ollama, llm, models)
 tests/test-spark.sh            # sparkyard gateway backend: config, preflight, dry-run argument wiring
 tests/test-yaml-validation.sh  # YAML parsing and validation
+tests/test-config-trust.sh     # Config-trust validators: env key injection, claude.args blocklist, mount safety
 tests/test-cli-integration.sh  # Every CLI command end-to-end (start, exec, stop lifecycle)
 tests/test-entrypoint.sh       # Entrypoint: PATH, volumes, permissions, services (slow)
 tests/test-integration.sh     # End-to-end: build base + project, verify tools
@@ -45,13 +46,35 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 
 - **Shared helpers** (used by multiple commands):
   - `_build_docker_args "$name"` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`, `cmd_llm`, `cmd_ollama`.
-  - `_read_claude_config` — Sets global `CLAUDE_EXTRA_ARGS` array and `SKIP_PERMISSIONS_FLAG` string from `sandbox.yaml`. Used by same commands.
+  - `_read_claude_config` — Sets global `CLAUDE_EXTRA_ARGS` array and `SKIP_PERMISSIONS_FLAG` string from `sandbox.yaml`. Used by every command that passes args to `claude`: `cmd_run`, `cmd_remote`, `cmd_claude`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`. Not `cmd_ollama`/`cmd_llm`/`cmd_start`, which call `_build_docker_args` but never invoke the `claude` binary.
   - `config_get` / `config_get_default` — YAML reading via Mike Farah's yq v4 (NOT jq-syntax yq).
   - `_load_spark_env` / `_apply_spark_backend` / `_spark_preflight` / `_spark_host_url` / `_spark_run` — sparkyard gateway backend, used by `cmd_spark_status`, `cmd_claude_spark`, `cmd_remote_spark`, and the `--spark` paths of `cmd_run` and `cmd_llm`. `_load_spark_env` reads (never `source`s) `${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env` for `SPARKYARD_URL` / `LITELLM_MASTER_KEY` / `SPARKYARD_MODEL`; a real env var of the same name always wins over the file. `_spark_host_url` rewrites `host.docker.internal` to `localhost` because that alias only resolves inside the container, not on the host doing the preflight check. `_spark_preflight` checks gateway reachability and that a given model is actually served before anything launches. `SANDBOX_DRY_RUN=1` makes `_spark_run` print the `docker` argv it would execute (master key masked) instead of running it — this is how `tests/test-spark.sh` asserts argument wiring without Docker; the preflight check still runs first, dry-run or not.
 
 - **Input validation**: `validate_name`, `validate_feature`, `validate_package`, `validate_model` — regex checks called before any value is used in Docker/filesystem operations.
 
-- **Security layers in the CLI**: env var blocklist (blocks PATH, NODE_OPTIONS, ANTHROPIC_*, proxy vars, etc.), git config key whitelist (only 10 safe keys), `claude.args` blocks `--dangerously-skip-permissions`.
+- **Security layers in the CLI**: env var blocklist (blocks PATH, NODE_OPTIONS,
+  ANTHROPIC_*, proxy vars, etc.), git config key whitelist (only 10 safe keys),
+  and a config-trust section holding three validators — `validate_env_key`
+  (env names must be identifier-shaped — letters/digits/`_`, plus `.`/`-`
+  after the first character — so a YAML key cannot be evaluated as a yq
+  expression; the lookup also uses `strenv`), `validate_claude_arg` (refuses
+  privilege- and credential-affecting flags as a hard error, warns on unknown
+  ones), and `validate_mount` (always refuses the Docker socket; refuses
+  credential and system paths unless `SANDBOX_ALLOW_UNSAFE_MOUNTS=1`).
+  They are called from `_build_docker_args` and `_read_claude_config`. Every
+  container-launching command already calls `_build_docker_args`; every
+  command that passes args to `claude` already calls `_read_claude_config` —
+  so a new command in either category cannot forget to validate.
+- **Config tamper protection**: `_build_docker_args` overlays the resolved
+  `sandbox.yaml`/`.yml` with a read-only file bind over every container path
+  that exposes it (default `/workspace` mount and each ancestor-matching
+  `mounts:` entry; never a named volume), so a prompt-injected agent cannot
+  edit, delete, or replace the config that governs the operator's next run —
+  reads still work. `SANDBOX_ALLOW_WRITABLE_CONFIG=1` is the runner-side
+  escape hatch (never a config key). `find_config` separately refuses when
+  both `sandbox.yaml` and `sandbox.yml` exist, closing the precedence hole the
+  overlay alone can't (an agent creating a new `sandbox.yaml` next to a
+  protected `sandbox.yml`).
 
 **`base/entrypoint.sh`** — Runs as root on container start. Does: firewall init (if strict), Ollama service start (if installed), persistent volume symlinks (history, gitconfig, .config, .local, npm prefix), git config from SANDBOX_GIT_* env vars, then `exec gosu node "$@"` to drop privileges.
 
