@@ -494,7 +494,7 @@ The container runs as root only during startup (for firewall init), then drops t
 
 ```
 sandbox-env/
-├── base/                  # Base image (node:20-slim + Claude Code + tools)
+├── base/                  # Base image (node:24-slim + Claude Code + tools)
 │   ├── Dockerfile
 │   ├── entrypoint.sh
 │   ├── init-firewall.sh

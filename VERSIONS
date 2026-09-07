@@ -5,12 +5,12 @@
 # Format: package=version        # file where it's pinned
 
 # Base image
-node=20.19-slim                   # base/Dockerfile (FROM)
+node=24.20-slim                   # base/Dockerfile (FROM)
 
 # Base tools (Dockerfile)
 claude-code=2.1.236               # base/Dockerfile — npm `stable` dist-tag as of 2026-09-06
-git-delta=0.18.2                  # base/Dockerfile
-gosu=1.17                         # base/Dockerfile
+git-delta=0.19.2                  # base/Dockerfile
+gosu=1.19                         # base/Dockerfile
 gh=apt-managed                    # base/Dockerfile — version managed by GitHub's apt repo
 
 # Go (features/go.sh)
