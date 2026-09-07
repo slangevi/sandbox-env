@@ -1548,8 +1548,13 @@ _build_docker_args() {
             for i in $(seq 0 $((domain_count - 1))); do
                 local domain
                 domain=$(yq -r ".allowed_domains[$i]" "$CONFIG_FILE")
-                if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
-                    error "Invalid domain '$domain'. Must be a valid domain name."
+                # A domain name, or an IPv4 literal / CIDR for a host with no
+                # resolvable name (a LAN NAS, say). A bare IPv4 literal already
+                # fits the domain pattern; only the CIDR form needs the second
+                # alternative, which also bounds the prefix to 0-32.
+                if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] \
+                   && [[ ! "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/(3[0-2]|[12]?[0-9])$ ]]; then
+                    error "Invalid domain '$domain'. Must be a domain name, an IPv4 address, or an IPv4 CIDR (a.b.c.d/0-32)."
                     exit 1
                 fi
                 domains="${domains:+${domains},}${domain}"

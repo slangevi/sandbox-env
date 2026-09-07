@@ -37,7 +37,9 @@ limitations you'll hit using them.
   different machine (e.g. `SPARKYARD_URL=http://dgx.local:14000`) is a
   different story: `init-firewall.sh` only opens egress to the container's
   own default-route gateway, so under `firewall: strict` a LAN host is
-  dropped unless you add it to `allowed_domains` in `sandbox.yaml`. Note that
+  dropped unless you add it to `allowed_domains` in `sandbox.yaml` (an IPv4
+  literal or CIDR works there — mDNS `.local` names don't resolve inside
+  the container). Note that
   doing so is itself an `allowed_domains` entry, which the Firewall
   requirement section below refuses by default — see there for the
   `SPARKYARD_ALLOW_UNSAFE_FIREWALL=1` override you'll need on top of this.

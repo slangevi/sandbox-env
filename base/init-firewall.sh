@@ -69,6 +69,15 @@ collect_domains() {
 
 while read -r domain; do
     [ -z "$domain" ] && continue
+    # IPv4 literals and CIDRs (a LAN host such as a NAS, which has no public
+    # DNS name and whose mDNS .local name does not resolve in here) go into
+    # the set directly — there is nothing for dig to resolve.
+    if [[ "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+        echo "Allowing IP literal $domain"
+        ipset -exist add allowed-domains "$domain" 2>/dev/null \
+            || echo "WARNING: Could not add $domain to the allowed set"
+        continue
+    fi
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
