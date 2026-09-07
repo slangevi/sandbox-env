@@ -19,7 +19,6 @@ FROM sandbox-base:latest
 USER root
 COPY features/${FEATURE}.sh /tmp/${FEATURE}.sh
 RUN chmod +x /tmp/${FEATURE}.sh && /tmp/${FEATURE}.sh
-USER node
 DOCKER
 
 PASS=0

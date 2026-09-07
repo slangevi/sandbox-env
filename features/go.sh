@@ -4,7 +4,7 @@ set -euo pipefail
 
 echo "=== Installing Go feature ==="
 
-GO_VERSION="1.22.5"
+GO_VERSION="1.27.1"
 ARCH=$(dpkg --print-architecture)
 if [ "$ARCH" = "amd64" ]; then GO_ARCH="amd64"; else GO_ARCH="arm64"; fi
 
@@ -20,7 +20,7 @@ export PATH="/usr/local/go/bin:$PATH"
 export GOPATH="/tmp/go-setup"
 
 # Install golangci-lint — pinned version
-GOLANGCI_LINT_VERSION="v2.1.0"
+GOLANGCI_LINT_VERSION="v2.13.2"
 curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
     | sh -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}"
 
