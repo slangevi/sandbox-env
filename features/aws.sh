@@ -12,7 +12,7 @@ ARCH=$(dpkg --print-architecture)
 if [ "$ARCH" = "amd64" ]; then AWS_ARCH="x86_64"; else AWS_ARCH="aarch64"; fi
 
 # Pin AWS CLI version for reproducible builds
-AWS_CLI_VERSION="2.27.30"
+AWS_CLI_VERSION="2.36.40"
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}-${AWS_CLI_VERSION}.zip" -o /tmp/awscliv2.zip
 cd /tmp && unzip -q awscliv2.zip
 /tmp/aws/install

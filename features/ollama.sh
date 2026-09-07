@@ -7,7 +7,7 @@ echo "=== Installing Ollama feature ==="
 # Install Ollama — pinned version via official install script
 apt-get update -qq && apt-get install -y --no-install-recommends zstd \
     && rm -rf /var/lib/apt/lists/*
-OLLAMA_VERSION="0.20.7" curl -fsSL https://ollama.com/install.sh | sh
+OLLAMA_VERSION="0.33.3" curl -fsSL https://ollama.com/install.sh | sh
 
 # Create model storage directory (expected to be mounted from host)
 mkdir -p /home/node/.ollama/models

@@ -5,7 +5,7 @@ set -euo pipefail
 echo "=== Installing glab feature ==="
 
 ARCH=$(dpkg --print-architecture)
-GLAB_VERSION="1.92.1"
+GLAB_VERSION="1.116.0"
 
 curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
     -o /tmp/glab.deb
