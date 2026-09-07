@@ -2366,7 +2366,7 @@ cmd_models() {
             log "Fixing model permissions..."
             docker run --rm \
                 -v "${ollama_volume}:/models" \
-                node:20-slim \
+                node:24-slim \
                 chown -R 1000:1000 /models
             ;;
         list)

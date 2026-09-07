@@ -1,4 +1,4 @@
-FROM node:20.19-slim
+FROM node:24.20-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.236
 ARG DEBIAN_FRONTEND=noninteractive
@@ -44,13 +44,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # git-delta for better diffs
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "amd64" ]; then DELTA_ARCH="x86_64"; else DELTA_ARCH="aarch64"; fi && \
-    curl -fsSL "https://github.com/dandavison/delta/releases/download/0.18.2/delta-0.18.2-${DELTA_ARCH}-unknown-linux-gnu.tar.gz" \
+    curl -fsSL "https://github.com/dandavison/delta/releases/download/0.19.2/delta-0.19.2-${DELTA_ARCH}-unknown-linux-gnu.tar.gz" \
     | tar xz -C /tmp && \
     mv /tmp/delta-*/delta /usr/local/bin/ && \
     rm -rf /tmp/delta-*
 
 # gosu for privilege dropping in entrypoint
-RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/1.17/gosu-$(dpkg --print-architecture)" -o /usr/local/bin/gosu \
+RUN curl -fsSL "https://github.com/tianon/gosu/releases/download/1.19/gosu-$(dpkg --print-architecture)" -o /usr/local/bin/gosu \
     && chmod +x /usr/local/bin/gosu \
     && gosu nobody true
 
