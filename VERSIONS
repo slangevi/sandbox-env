@@ -8,7 +8,7 @@
 node=20.19-slim                   # base/Dockerfile (FROM)
 
 # Base tools (Dockerfile)
-claude-code=2.1.104               # base/Dockerfile — pinned due to paste regression in 2.1.105+ (anthropics/claude-code#47699)
+claude-code=2.1.236               # base/Dockerfile — npm `stable` dist-tag as of 2026-09-06
 git-delta=0.18.2                  # base/Dockerfile
 gosu=1.17                         # base/Dockerfile
 gh=apt-managed                    # base/Dockerfile — version managed by GitHub's apt repo
@@ -42,6 +42,6 @@ tsx=4                              # features/node-extra.sh (major version pin)
 npm-check-updates=17              # features/node-extra.sh (major version pin)
 
 # pip packages (features/llm.sh)
-llm=0.24                          # features/llm.sh
-llm-anthropic=0.24                # features/llm.sh (formerly llm-claude-3)
-llm-ollama=0.15.1                 # features/llm.sh
+llm=0.34                          # features/llm.sh
+llm-anthropic=0.28                # features/llm.sh (formerly llm-claude-3)
+llm-ollama=0.17.1                 # features/llm.sh
