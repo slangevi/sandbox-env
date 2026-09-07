@@ -80,6 +80,39 @@ EOF
 check "minimal YAML builds" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 docker rmi sandbox-minimal-test:latest 2>/dev/null || true
 
+# Test: allowed_domains accepts IPv4 literals and CIDRs alongside domains.
+# The check lives in _build_docker_args, which only `run` exercises, so
+# this needs a project image (features-free, so it builds in seconds).
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
+name: cidr-test
+firewall: strict
+allowed_domains:
+  - 10.0.4.23
+  - 10.0.4.0/24
+  - example.org
+EOF
+check "allowed_domains with IP literal and CIDR builds" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+cidr_out=$(cd "$TEST_TMPDIR" && "$SANDBOX" run -- true 2>&1) || true
+if echo "$cidr_out" | grep -q "Invalid domain"; then
+    echo "  FAIL: CIDR in allowed_domains rejected: $(echo "$cidr_out" | grep 'Invalid domain' | head -1)"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: CIDR in allowed_domains accepted"
+    PASS=$((PASS + 1))
+fi
+docker rmi sandbox-cidr-test:latest 2>/dev/null || true
+
+# Test: a malformed CIDR prefix is still rejected
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
+name: badcidr-test
+firewall: strict
+allowed_domains:
+  - 10.0.4.0/33
+EOF
+check "bad CIDR config builds (validation is at run time)" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+check_output "malformed CIDR rejected" "Invalid domain" bash -c "cd $TEST_TMPDIR && $SANDBOX run -- true"
+docker rmi sandbox-badcidr-test:latest 2>/dev/null || true
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

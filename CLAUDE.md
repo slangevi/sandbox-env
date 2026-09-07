@@ -78,7 +78,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 
 **`base/entrypoint.sh`** — Runs as root on container start. Does: firewall init (if strict), Ollama service start (if installed), persistent volume symlinks (history, gitconfig, .config, .local, npm prefix), git config from SANDBOX_GIT_* env vars, then `exec gosu node "$@"` to drop privileges.
 
-**`base/init-firewall.sh`** — iptables strict-mode setup. Temporarily allows broad DNS for domain resolution during init, then restricts to Docker resolver only. Blocks IPv6. Restricts SSH to ipset destinations. Verifies both blocking and allowing work.
+**`base/init-firewall.sh`** — iptables strict-mode setup. Temporarily allows broad DNS for domain resolution during init, then restricts to Docker resolver only. Allowed-domain entries that are IPv4 literals or CIDRs skip `dig` and go straight into the ipset (the CLI's `allowed_domains` regex admits both). Blocks IPv6. Restricts SSH to ipset destinations. Verifies both blocking and allowing work.
 
 **`templates/Dockerfile.project.tmpl`** — Template with `%%FEATURES%%`, `%%PACKAGES%%`, `%%SETUP%%` placeholders. The CLI reads this, replaces placeholders with generated Dockerfile instructions, writes to a temp dir, and builds.
 

@@ -475,7 +475,14 @@ firewall: strict
 allowed_domains:
   - api.example.com
   - internal.mycompany.com
+  - 10.0.4.23        # an IPv4 literal
+  - 192.168.10.0/24  # or a CIDR
 ```
+
+Entries are resolved with DNS at container start, so a host with no public
+name — a NAS on your LAN, say — can be given as an IPv4 literal or CIDR
+instead; those are added to the allow set directly. mDNS `.local` names
+don't resolve inside the container, so use the address.
 
 **`open`** — No network restrictions. Use when you need unrestricted access (e.g., installing packages from arbitrary sources). Set `firewall: open` in your sandbox.yaml.
 
