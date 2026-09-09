@@ -304,7 +304,7 @@ Drop a script in `features/`. It must:
 ```
 sandbox build-base          Build the base image (once, or to update)
 sandbox build [--no-cache]  Build project image from sandbox.yaml
-sandbox run [--headless] [--spark <model>] [-- <cmd>]  Run the container, a command, headless Claude, or a spark-backed headless run
+sandbox run [--headless] [--spark <model>] [--env K=V]... [--claude-arg A]... [-- <cmd>]  Run the container, a command, or headless Claude
 sandbox claude              Launch Claude Code (Anthropic API)
 sandbox claude-local <model> Launch Claude Code with a local Ollama model
 sandbox claude-spark <model> Launch Claude Code against the sparkyard gateway
@@ -413,6 +413,32 @@ sandbox run -- "Fix the failing tests"
 ```
 
 Output is saved to `~/.sandbox/logs/<name>/` with timestamps.
+
+#### Per-run environment and Claude arguments
+
+A host-side caller (for example the Matrix bridge from `agent-matrix-mcp`) can
+give one run extra container environment and extra Claude Code arguments:
+
+```bash
+sandbox run --headless --spark qwen3-coder-next \
+    --env MATRIX_THREAD_ID='$abc123' \
+    --claude-arg --session-id --claude-arg 6f1c…-uuid \
+    --claude-arg --output-format --claude-arg json \
+    -- "check the NAS disk health"
+```
+
+Both flags are repeatable and only valid with `--headless`. They are operator
+input, at the same trust level as the prompt, but guarded anyway:
+
+- `--env KEY=VALUE`: `KEY` must be identifier-shaped; names starting with
+  `ANTHROPIC_`, `CLAUDE_`, `SANDBOX_`, `LD_`, `PYTHON`, `NODE_` and the names
+  `PATH`, `HOME`, `SHELL`, `USER` are refused; a key that `sandbox.yaml`'s
+  `env:` already sets cannot be overridden.
+- `--claude-arg ARG`: each value is checked like a `claude.args` entry — the
+  blocklist (see "claude.args safety") halts the run; unknown flags warn.
+  `--session-id`, `--fork-session` and `--output-format` are known-safe.
+  Values land after the config's `claude.args` and the `--model`, right before
+  `-p`.
 
 ### Autonomous mode
 

@@ -2560,7 +2560,7 @@ Usage: sandbox <command> [options]
 Commands:
   build-base          Build the base sandbox image
   build [--no-cache]   Build project image from sandbox.yaml
-  run [--headless] [--spark <model>]  Run the sandbox container
+  run [--headless] [--spark <model>] [--env K=V]... [--claude-arg A]...  Run the sandbox container
   claude              Launch Claude Code directly
   remote              Start Claude Code remote control server
   claude-local <model>  Launch Claude Code with a local Ollama model
