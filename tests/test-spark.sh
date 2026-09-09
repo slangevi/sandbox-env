@@ -451,6 +451,41 @@ check_output "run --spark rejects a flag as its model" "requires a model name" \
 check_output "run --spark calls preflight (unreachable gateway surfaces)" \
     "gateway unreachable" run_unreachable run --headless --spark qwen3-coder-next -- "hello"
 
+# ── run --claude-arg (per-run Claude args for the Matrix bridge) ─────
+echo "-- run --claude-arg --"
+
+check_output "run --claude-arg passes values through, in order, after --model and before -p" \
+    "--model qwen3-coder-next --session-id abc-123 --output-format json -p hello" \
+    run_dry run --headless --spark qwen3-coder-next \
+        --claude-arg --session-id --claude-arg abc-123 --claude-arg --output-format --claude-arg json -- "hello"
+
+check_status "run --claude-arg with safe flags exits 0" 0 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --session-id --claude-arg abc -- "hello"
+
+check_not_output "--session-id is known-safe (no warning)" "Unrecognized claude.args" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --session-id --claude-arg abc -- "hello"
+
+check_not_output "--output-format is known-safe (no warning)" "Unrecognized claude.args" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --output-format --claude-arg json -- "hello"
+
+check_output "run --claude-arg blocks a trust-changing flag" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_output "the block names the flag's source" "in --claude-arg" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_status "a blocked --claude-arg halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_output "an unknown --claude-arg flag is warned about, not blocked" "Unrecognized claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --frobnicate -- "hello"
+
+check_output "run --claude-arg requires a value" "requires a value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg
+
+check_output "run --claude-arg requires --headless" "require --headless" \
+    run_dry run --claude-arg --verbose -- "hello"
+
 # ── remote-spark ─────────────────────────────────────────────────────
 echo "-- remote-spark --"
 

@@ -193,16 +193,19 @@ CLAUDE_ARG_KNOWN_SAFE=(
     --model
     --verbose
     --print
+    --session-id
+    --fork-session
+    --output-format
 )
 
 validate_claude_arg() {
-    local arg="$1"
+    local arg="$1" source="${2:-$CONFIG_FILE}"
     local bare="${arg%%=*}"
     local b s
 
     for b in "${CLAUDE_ARG_BLOCKED[@]}"; do
         if [ "$bare" = "$b" ]; then
-            error "Blocked claude.args value '$arg' in $CONFIG_FILE."
+            error "Blocked claude.args value '$arg' in $source."
             error "This flag can change Claude Code's trust, permissions, or credential"
             error "routing, which a committed config file must not decide."
             case "$b" in
@@ -220,7 +223,7 @@ validate_claude_arg() {
     # Only flags are worth warning about; bare values (a model name, a prompt)
     # are the operands of a flag we have already seen.
     case "$arg" in
-        -*) warn "Unrecognized claude.args value '$arg' — allowing, but review it." ;;
+        -*) warn "Unrecognized claude.args value '$arg' in $source — allowing, but review it." ;;
     esac
 }
 
@@ -1072,6 +1075,7 @@ cmd_run() {
     local passthrough_args=()
     local parsing_passthrough=false
     local spark_model=""
+    local run_claude_args=()
 
     while [ $# -gt 0 ]; do
         if [ "$1" = "--" ]; then
@@ -1091,6 +1095,14 @@ cmd_run() {
                 exit 1
             fi
             shift
+        elif [ "$1" = "--claude-arg" ]; then
+            if [ -z "${2:-}" ]; then
+                error "--claude-arg requires a value."
+                error "Usage: sandbox run --headless [--claude-arg <arg>]... -- \"your prompt\""
+                exit 1
+            fi
+            run_claude_args+=("$2")
+            shift
         fi
         shift
     done
@@ -1099,6 +1111,11 @@ cmd_run() {
         error "--spark requires --headless."
         error "Usage: sandbox run --headless --spark <model> -- \"your prompt\""
         error "For an interactive session against sparkyard, use: sandbox claude-spark <model>"
+        exit 1
+    fi
+
+    if [ ${#run_claude_args[@]} -gt 0 ] && [ "$mode" != "headless" ]; then
+        error "--claude-arg and --env require --headless."
         exit 1
     fi
 
@@ -1115,6 +1132,15 @@ cmd_run() {
         DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
         CLAUDE_EXTRA_ARGS+=("--model" "$spark_model")
     fi
+
+    # Per-run Claude args (operator CLI input) go through the same validator as
+    # the committed claude.args, and land after them and after --model so the
+    # invocation reads: claude [config args] [--model X] [run args] -p "prompt".
+    local run_arg
+    for run_arg in ${run_claude_args[@]+"${run_claude_args[@]}"}; do
+        validate_claude_arg "$run_arg" "--claude-arg"
+        CLAUDE_EXTRA_ARGS+=("$run_arg")
+    done
 
     # Run
     if [ "$mode" = "headless" ]; then
