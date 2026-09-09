@@ -155,6 +155,43 @@ validate_env_key() {
     fi
 }
 
+# Per-run env from `sandbox run --env KEY=VALUE`. This is operator CLI input,
+# so it carries the same trust as the prompt — but a typo, or a caller such
+# as the Matrix bridge relaying a value, must not be able to alter
+# credentials, trust, or the runtime through the environment. Names are
+# identifier-shaped (stricter than validate_env_key: no '.' or '-'), the
+# namespaces Claude Code, this CLI, and the runtimes read are reserved, and
+# a key the committed sandbox.yaml already sets cannot be overridden.
+validate_run_env() {
+    local kv="$1"
+    case "$kv" in
+        *=*) ;;
+        *)
+            error "--env expects KEY=VALUE, got '$kv'."
+            exit 1 ;;
+    esac
+    local key="${kv%%=*}" prefix
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        error "Invalid --env name '$key'. Names must match: ^[A-Za-z_][A-Za-z0-9_]*\$"
+        exit 1
+    fi
+    for prefix in ANTHROPIC_ CLAUDE_ SANDBOX_ LD_ PYTHON NODE_; do
+        if [ "${key#"$prefix"}" != "$key" ]; then
+            error "--env '$key' is not allowed: names starting with '$prefix' are reserved."
+            exit 1
+        fi
+    done
+    case "$key" in
+        PATH|HOME|SHELL|USER)
+            error "--env '$key' is not allowed: it would alter the container's runtime."
+            exit 1 ;;
+    esac
+    if yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null | grep -qx -- "$key"; then
+        error "--env '$key' is already set in $CONFIG_FILE; a per-run value may not override committed config."
+        exit 1
+    fi
+}
+
 # Flags that let a committed sandbox.yaml change Claude Code's trust,
 # permissions, or where credentials are sent.
 #
@@ -1076,6 +1113,7 @@ cmd_run() {
     local parsing_passthrough=false
     local spark_model=""
     local run_claude_args=()
+    local run_env=()
 
     while [ $# -gt 0 ]; do
         if [ "$1" = "--" ]; then
@@ -1103,6 +1141,14 @@ cmd_run() {
             fi
             run_claude_args+=("$2")
             shift
+        elif [ "$1" = "--env" ]; then
+            if [ -z "${2:-}" ] || [ "${2#-}" != "$2" ]; then
+                error "--env expects KEY=VALUE."
+                error "Usage: sandbox run --headless [--env KEY=VALUE]... -- \"your prompt\""
+                exit 1
+            fi
+            run_env+=("$2")
+            shift
         fi
         shift
     done
@@ -1114,13 +1160,22 @@ cmd_run() {
         exit 1
     fi
 
-    if [ ${#run_claude_args[@]} -gt 0 ] && [ "$mode" != "headless" ]; then
+    if { [ ${#run_claude_args[@]} -gt 0 ] || [ ${#run_env[@]} -gt 0 ]; } && [ "$mode" != "headless" ]; then
         error "--claude-arg and --env require --headless."
         exit 1
     fi
 
     # Build common docker args
     _build_docker_args "$name"
+
+    # Per-run env (operator CLI input), after the config's env so the container
+    # sees both; validate_run_env refuses overrides of committed keys.
+    local run_kv
+    for run_kv in ${run_env[@]+"${run_env[@]}"}; do
+        validate_run_env "$run_kv"
+        DOCKER_ARGS+=("-e" "$run_kv")
+    done
+
     _read_claude_config
 
     if [ -n "$spark_model" ]; then
