@@ -242,7 +242,7 @@ PY
 PORT=18400
 python3 "$TMP/stub.py" "$PORT" &
 STUB_PID=$!
-trap 'kill "$STUB_PID" 2>/dev/null || true; docker rm -f sandbox-spark-argtest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-argtest:latest >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
+trap 'kill "$STUB_PID" 2>/dev/null || true; docker rm -f sandbox-spark-argtest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-argtest:latest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-envtest:latest >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
 
 for _ in $(seq 1 50); do
     curl -sf "http://127.0.0.1:$PORT/health/liveliness" >/dev/null 2>&1 && break
@@ -450,6 +450,207 @@ check_output "run --spark rejects a flag as its model" "requires a model name" \
 # T2: prove _spark_preflight is actually wired into cmd_run's --spark block.
 check_output "run --spark calls preflight (unreachable gateway surfaces)" \
     "gateway unreachable" run_unreachable run --headless --spark qwen3-coder-next -- "hello"
+
+# ── run --claude-arg (per-run Claude args for the Matrix bridge) ─────
+echo "-- run --claude-arg --"
+
+check_output "run --claude-arg passes values through, in order, after --model and before -p" \
+    "--model qwen3-coder-next --session-id abc-123 --output-format json -p hello" \
+    run_dry run --headless --spark qwen3-coder-next \
+        --claude-arg --session-id --claude-arg abc-123 --claude-arg --output-format --claude-arg json -- "hello"
+
+check_status "run --claude-arg with safe flags exits 0" 0 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --session-id --claude-arg abc -- "hello"
+
+check_not_output "--session-id is known-safe (no warning)" "Unrecognized claude.args" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --session-id --claude-arg abc -- "hello"
+
+check_not_output "--output-format is known-safe (no warning)" "Unrecognized claude.args" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --output-format --claude-arg json -- "hello"
+
+check_output "run --claude-arg blocks a trust-changing flag" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_output "the block names the flag's source" "in --claude-arg" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_status "a blocked --claude-arg halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+# Commit A: print-mode permission and prompt-file flags added to
+# CLAUDE_ARG_BLOCKED — they can redirect Claude's permission decisions to an
+# external tool/process, or read a system prompt from an arbitrary file.
+check_output "run --claude-arg blocks --permission-prompt-tool" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-prompt-tool --claude-arg x -- "hello"
+
+check_status "the --permission-prompt-tool block halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-prompt-tool --claude-arg x -- "hello"
+
+# B5: belt-and-braces coverage for other blocked flags/spellings via --claude-arg.
+check_output "run --claude-arg blocks --flag=value spelling too" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode=bypassPermissions -- "hello"
+
+check_output "run --claude-arg blocks --settings" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --settings --claude-arg '{}' -- "hello"
+
+check_output "run --claude-arg blocks --mcp-config" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --mcp-config --claude-arg x -- "hello"
+
+# B3: --model must go through --spark (validated against the gateway), not
+# through --claude-arg, even though --model is on claude.args's known-safe list.
+check_output "run --claude-arg refuses --model in favor of --spark" \
+    "not allowed; choose the model with --spark" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --model --claude-arg other -- "hello"
+
+check_status "the --claude-arg --model refusal halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --model --claude-arg other -- "hello"
+
+# B4: --claude-arg validation must run BEFORE the spark preflight's network
+# call, so a blocked flag is reported on its own terms even when the gateway
+# is unreachable — not masked by a generic "gateway unreachable" error.
+check_output "an invalid --claude-arg is caught before the spark preflight (B4)" \
+    "Blocked claude.args value" \
+    run_unreachable run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+check_not_output "...and is not masked by the preflight's gateway-unreachable error" \
+    "gateway unreachable" \
+    run_unreachable run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
+
+# B1: '=' is not a valid separator for --claude-arg — catch it and error,
+# rather than let it silently vanish as an unmatched argument.
+check_output "run --claude-arg=X errors instead of silently vanishing" \
+    "with a space, not '='" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg=--verbose -- "hello"
+
+check_status "the --claude-arg= spelling halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg=--verbose -- "hello"
+
+check_output "an unknown --claude-arg flag is warned about, not blocked" "Unrecognized claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --frobnicate -- "hello"
+
+check_output "run --claude-arg requires a value" "requires a value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg
+
+check_output "run --claude-arg requires --headless" "require --headless" \
+    run_dry run --claude-arg --verbose -- "hello"
+
+# ── run --env (per-run container env for the Matrix bridge) ─────────
+echo "-- run --env --"
+
+check_output "run --env adds the variable" "-e MATRIX_THREAD_ID=root-1" \
+    run_dry run --headless --spark qwen3-coder-next --env MATRIX_THREAD_ID=root-1 -- "hello"
+
+check_output "run --env keeps everything after the first = as the value" "-e NOTE=a=b=c" \
+    run_dry run --headless --spark qwen3-coder-next --env NOTE=a=b=c -- "hello"
+
+check_status "run --env accepted exits 0" 0 \
+    run_dry run --headless --spark qwen3-coder-next --env MATRIX_THREAD_ID=root-1 -- "hello"
+
+# B2 unification: env_key_is_dangerous (the shared list, also used by
+# _build_docker_args for committed config) is checked BEFORE the per-run-only
+# reserved-prefix loop below. ANTHROPIC_API_KEY, SANDBOX_FIREWALL and
+# PYTHONPATH are all literal/glob entries in that shared list, so they are
+# now rejected there first — with the shared list's message, not the
+# prefix loop's "reserved" wording. The rejection itself is unchanged
+# (still refused, still exit 1); only which check catches it first, and the
+# message that names it, changed. The shared list's "ANTHROPIC_*" is a full
+# glob, so EVERY ANTHROPIC_-prefixed key is now caught there — the reserved-
+# prefix loop's own ANTHROPIC_ entry is fully shadowed and can never fire
+# for validate_run_env; SANDBOX_CUSTOM below (outside the shared list, which
+# only names specific SANDBOX_* keys) proves the reserved-prefix loop is
+# still live for the namespaces it does not fully shadow.
+check_output "run --env rejects ANTHROPIC_API_KEY (caught by the shared dangerous-key list)" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env ANTHROPIC_API_KEY=x -- "hello"
+
+check_output "run --env rejects the CLAUDE_ prefix" "reserved" \
+    run_dry run --headless --spark qwen3-coder-next --env CLAUDE_CODE_ENTRYPOINT=cli -- "hello"
+
+check_output "run --env rejects SANDBOX_FIREWALL (caught by the shared dangerous-key list)" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env SANDBOX_FIREWALL=open -- "hello"
+
+check_output "run --env rejects the SANDBOX_ prefix generally (reserved-prefix loop)" "reserved" \
+    run_dry run --headless --spark qwen3-coder-next --env SANDBOX_CUSTOM=x -- "hello"
+
+check_output "run --env rejects PYTHONPATH (caught by the shared dangerous-key list)" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env PYTHONPATH=/evil -- "hello"
+
+check_output "run --env rejects PATH" "alter the container" \
+    run_dry run --headless --spark qwen3-coder-next --env PATH=/x -- "hello"
+
+check_status "a rejected --env halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --env PATH=/x -- "hello"
+
+# B2: env_key_is_dangerous is the single dangerous-key list shared with
+# _build_docker_args's committed-config filter, extended for the per-run
+# path with variables that run code or reroute git the same way LD_PRELOAD
+# and the proxy variables do.
+check_output "run --env rejects HTTPS_PROXY (shared dangerous-key list)" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env HTTPS_PROXY=http://x -- "hello"
+
+check_status "the HTTPS_PROXY rejection halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --env HTTPS_PROXY=http://x -- "hello"
+
+check_output "run --env rejects BASH_ENV" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env BASH_ENV=/x -- "hello"
+
+check_output "run --env rejects GIT_SSH_COMMAND" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env GIT_SSH_COMMAND=x -- "hello"
+
+check_output "run --env rejects NPM_CONFIG_REGISTRY" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env NPM_CONFIG_REGISTRY=x -- "hello"
+
+check_output "run --env rejects PYTHON (reserved prefix, extended list)" "reserved" \
+    run_dry run --headless --spark qwen3-coder-next --env PYTHON=x -- "hello"
+
+check_output "run --env rejects NODE_ (reserved prefix)" "reserved" \
+    run_dry run --headless --spark qwen3-coder-next --env NODE_=x -- "hello"
+
+check_output "run --env accepts an empty value" "-e KEY=" \
+    run_dry run --headless --spark qwen3-coder-next --env KEY= -- "hello"
+
+check_status "the empty-value --env exits 0" 0 \
+    run_dry run --headless --spark qwen3-coder-next --env KEY= -- "hello"
+
+check_output "run --env rejects an empty name" "Invalid --env name" \
+    run_dry run --headless --spark qwen3-coder-next --env =value -- "hello"
+
+check_output "run --env rejects a bad name" "Invalid --env name" \
+    run_dry run --headless --spark qwen3-coder-next --env BAD-NAME=1 -- "hello"
+
+check_output "run --env requires KEY=VALUE" "KEY=VALUE" \
+    run_dry run --headless --spark qwen3-coder-next --env JUSTAKEY -- "hello"
+
+check_output "run --env requires a value argument" "KEY=VALUE" \
+    run_dry run --headless --spark qwen3-coder-next --env
+
+# B1: '=' is not a valid separator for --env — catch it and error, rather
+# than let it silently vanish as an unmatched argument.
+check_output "run --env=X errors instead of silently vanishing" \
+    "with a space, not '='" \
+    run_dry run --headless --spark qwen3-coder-next --env=MATRIX_THREAD_ID=x -- "hello"
+
+check_status "the --env= spelling halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --env=MATRIX_THREAD_ID=x -- "hello"
+
+check_output "run --env requires --headless" "require --headless" \
+    run_dry run --env X=1 -- "hello"
+
+PROJ_ENV="$TMP/proj-env"
+mkdir -p "$PROJ_ENV"
+cat > "$PROJ_ENV/sandbox.yaml" <<'EOF'
+name: spark-envtest
+firewall: open
+env:
+  MATRIX_THREAD_ID: fixed
+EOF
+docker image tag sandbox-base:latest sandbox-spark-envtest:latest >/dev/null 2>&1
+run_dry_env() { (cd "$PROJ_ENV" && "${DRY_ENV[@]}" "$SANDBOX" "$@"); }
+
+check_output "run --env may not override a key committed in sandbox.yaml" "already set" \
+    run_dry_env run --headless --spark qwen3-coder-next --env MATRIX_THREAD_ID=other -- "hello"
+
+check_output "run --env still adds a key the config does not set" "-e OTHER_KEY=1" \
+    run_dry_env run --headless --spark qwen3-coder-next --env OTHER_KEY=1 -- "hello"
 
 # ── remote-spark ─────────────────────────────────────────────────────
 echo "-- remote-spark --"
