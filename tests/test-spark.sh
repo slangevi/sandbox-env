@@ -477,6 +477,15 @@ check_output "the block names the flag's source" "in --claude-arg" \
 check_status "a blocked --claude-arg halts" 1 \
     run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-mode --claude-arg bypassPermissions -- "hello"
 
+# Commit A: print-mode permission and prompt-file flags added to
+# CLAUDE_ARG_BLOCKED — they can redirect Claude's permission decisions to an
+# external tool/process, or read a system prompt from an arbitrary file.
+check_output "run --claude-arg blocks --permission-prompt-tool" "Blocked claude.args value" \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-prompt-tool --claude-arg x -- "hello"
+
+check_status "the --permission-prompt-tool block halts" 1 \
+    run_dry run --headless --spark qwen3-coder-next --claude-arg --permission-prompt-tool --claude-arg x -- "hello"
+
 check_output "an unknown --claude-arg flag is warned about, not blocked" "Unrecognized claude.args value" \
     run_dry run --headless --spark qwen3-coder-next --claude-arg --frobnicate -- "hello"
 

@@ -204,6 +204,8 @@ CLAUDE_ARG_BLOCKED=(
     --allow-dangerously-skip-permissions
     --no-sandbox
     --permission-mode
+    --permission-prompt-tool
+    --permission-prompts
     --settings
     --setting-sources
     --mcp-config
@@ -216,7 +218,9 @@ CLAUDE_ARG_BLOCKED=(
     --allowed-tools
     --tools
     --system-prompt
+    --system-prompt-file
     --append-system-prompt
+    --append-system-prompt-file
     --bare
     --betas
 )
