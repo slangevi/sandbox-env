@@ -304,7 +304,7 @@ Drop a script in `features/`. It must:
 ```
 sandbox build-base          Build the base image (once, or to update)
 sandbox build [--no-cache]  Build project image from sandbox.yaml
-sandbox run [--headless] [--spark <model>] [--env K=V]... [--claude-arg A]... [-- <cmd>]  Run the container, a command, or headless Claude
+sandbox run [--headless] [--spark <model>] [--env K=V]... [--claude-arg A]... [-- <cmd>]  Run the container, a command, headless Claude, or a spark-backed headless run
 sandbox claude              Launch Claude Code (Anthropic API)
 sandbox claude-local <model> Launch Claude Code with a local Ollama model
 sandbox claude-spark <model> Launch Claude Code against the sparkyard gateway
@@ -430,15 +430,21 @@ sandbox run --headless --spark qwen3-coder-next \
 Both flags are repeatable and only valid with `--headless`. They are operator
 input, at the same trust level as the prompt, but guarded anyway:
 
-- `--env KEY=VALUE`: `KEY` must be identifier-shaped; names starting with
-  `ANTHROPIC_`, `CLAUDE_`, `SANDBOX_`, `LD_`, `PYTHON`, `NODE_` and the names
-  `PATH`, `HOME`, `SHELL`, `USER` are refused; a key that `sandbox.yaml`'s
-  `env:` already sets cannot be overridden.
+- `--env KEY=VALUE`: use a space, not `=`, to separate `--env`/`--claude-arg`
+  from their value — `--env=KEY=VALUE` is refused rather than silently
+  dropped. `KEY` must be identifier-shaped, and a name is refused when it
+  could alter credentials, trust, or the runtime — the same list committed
+  `env:` keys are checked against: `PATH`, `HOME`, `SHELL`, `USER`, `LD_*`,
+  `NODE_OPTIONS`/`NODE_*`, `NPM_CONFIG_*`, `PYTHON*`, `PROMPT_COMMAND`,
+  `EDITOR`, `VISUAL`, `DOCKER_HOST`, the proxy variables, `BASH_ENV`/`ENV`,
+  the `GIT_*` execution variables, `SANDBOX_*`, and `ANTHROPIC_*`/`CLAUDE_*`;
+  a key that `sandbox.yaml`'s `env:` already sets cannot be overridden.
 - `--claude-arg ARG`: each value is checked like a `claude.args` entry — the
   blocklist (see "claude.args safety") halts the run; unknown flags warn.
   `--session-id`, `--fork-session` and `--output-format` are known-safe.
-  Values land after the config's `claude.args` and the `--model`, right before
-  `-p`.
+  `--model` is refused in favour of `--spark <model>`, which is validated
+  against the gateway. Values land after the config's `claude.args` and the
+  `--model`, right before `-p`.
 
 ### Autonomous mode
 

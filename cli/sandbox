@@ -155,6 +155,29 @@ validate_env_key() {
     fi
 }
 
+# Env var names that would let ANY caller — a committed sandbox.yaml `env:`
+# or a per-run `--env` — alter the container's runtime, escalate credentials,
+# or reroute git/network traffic. Shared by _build_docker_args (committed
+# config) and validate_run_env (per-run CLI input) so the two lists cannot
+# drift apart; see the comments on each caller for what each variable would
+# let an attacker do. A `case` (not a regex) so the trailing `*` prefixes
+# (SANDBOX_GIT_*, ANTHROPIC_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*) work.
+env_key_is_dangerous() {
+    local key="$1"
+    case "$key" in
+        PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
+        NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
+        EDITOR|VISUAL|DOCKER_HOST|\
+        http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
+        SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*|ANTHROPIC_*|\
+        BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_PROXY_COMMAND|\
+        GIT_CONFIG_COUNT|GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 # Per-run env from `sandbox run --env KEY=VALUE`. This is operator CLI input,
 # so it carries the same trust as the prompt — but a typo, or a caller such
 # as the Matrix bridge relaying a value, must not be able to alter
@@ -175,18 +198,26 @@ validate_run_env() {
         error "Invalid --env name '$key'. Names must match: ^[A-Za-z_][A-Za-z0-9_]*\$"
         exit 1
     fi
-    for prefix in ANTHROPIC_ CLAUDE_ SANDBOX_ LD_ PYTHON NODE_; do
+    if env_key_is_dangerous "$key"; then
+        error "--env '$key' is not allowed: it would alter the container's runtime or credentials."
+        exit 1
+    fi
+    # Per-run stays stricter than committed config: these prefixes are fine
+    # in a reviewed, committed sandbox.yaml `env:` (env_key_is_dangerous above
+    # only blocks specific well-known names), but a per-run value from the
+    # Matrix bridge or a typo-prone operator gets the whole namespace refused.
+    for prefix in ANTHROPIC_ CLAUDE_ SANDBOX_ LD_ PYTHON NODE_ NPM_CONFIG_; do
         if [ "${key#"$prefix"}" != "$key" ]; then
             error "--env '$key' is not allowed: names starting with '$prefix' are reserved."
             exit 1
         fi
     done
-    case "$key" in
-        PATH|HOME|SHELL|USER)
-            error "--env '$key' is not allowed: it would alter the container's runtime."
-            exit 1 ;;
-    esac
-    if yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null | grep -qx -- "$key"; then
+    # Captured first so a SIGPIPE from yq under `set -o pipefail` can never
+    # make this `if` silently false (fail-open) — grep sees a plain variable,
+    # not a pipeline yq could be killed inside.
+    local committed_keys
+    committed_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
+    if grep -qx -- "$key" <<<"$committed_keys"; then
         error "--env '$key' is already set in $CONFIG_FILE; a per-run value may not override committed config."
         exit 1
     fi
@@ -1153,6 +1184,9 @@ cmd_run() {
             fi
             run_env+=("$2")
             shift
+        elif [ "${1#--env=}" != "$1" ] || [ "${1#--claude-arg=}" != "$1" ]; then
+            error "Use '--env KEY=VALUE' and '--claude-arg ARG' with a space, not '='."
+            exit 1
         fi
         shift
     done
@@ -1182,6 +1216,20 @@ cmd_run() {
 
     _read_claude_config
 
+    # Validate per-run Claude args (operator CLI input) through the same
+    # validator as the committed claude.args, and BEFORE the spark preflight's
+    # network round-trip: a blocked or malformed --claude-arg must fail fast
+    # with its own message, not get masked by a later "gateway unreachable"
+    # if the preflight call happens to fail too (B4).
+    local run_arg
+    for run_arg in ${run_claude_args[@]+"${run_claude_args[@]}"}; do
+        validate_claude_arg "$run_arg" "--claude-arg"
+        if [ "${run_arg%%=*}" = "--model" ]; then
+            error "--claude-arg --model is not allowed; choose the model with --spark <model> (validated against the gateway)."
+            exit 1
+        fi
+    done
+
     if [ -n "$spark_model" ]; then
         _load_spark_env
         _spark_guard_firewall
@@ -1192,12 +1240,10 @@ cmd_run() {
         CLAUDE_EXTRA_ARGS+=("--model" "$spark_model")
     fi
 
-    # Per-run Claude args (operator CLI input) go through the same validator as
-    # the committed claude.args, and land after them and after --model so the
-    # invocation reads: claude [config args] [--model X] [run args] -p "prompt".
-    local run_arg
+    # Already validated above; appended after the config's claude.args and
+    # after --model, so the invocation reads:
+    # claude [config args] [--model X] [run args] -p "prompt".
     for run_arg in ${run_claude_args[@]+"${run_claude_args[@]}"}; do
-        validate_claude_arg "$run_arg" "--claude-arg"
         CLAUDE_EXTRA_ARGS+=("$run_arg")
     done
 
@@ -1574,15 +1620,10 @@ _build_docker_args() {
     env_keys=$(yq -r '.env // {} | keys | .[]' "$CONFIG_FILE" 2>/dev/null) || true
     while IFS= read -r key; do
         [ -z "$key" ] && continue
-        case "$key" in
-            PATH|HOME|SHELL|USER|LD_PRELOAD|LD_LIBRARY_PATH|NODE_OPTIONS|\
-            NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
-            EDITOR|VISUAL|DOCKER_HOST|\
-            http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-            SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*|ANTHROPIC_*)
-                warn "Skipping dangerous env var '$key'"
-                continue ;;
-        esac
+        if env_key_is_dangerous "$key"; then
+            warn "Skipping dangerous env var '$key'"
+            continue
+        fi
         validate_env_key "$key"
         local val
         # strenv() passes the key as DATA, so even if the regex above is ever
@@ -2564,7 +2605,7 @@ Usage: sandbox <command> [options]
 Commands:
   build-base          Build the base sandbox image
   build [--no-cache]   Build project image from sandbox.yaml
-  run [--headless] [--spark <model>] [--env K=V]... [--claude-arg A]...  Run the sandbox container
+  run [--headless] [--spark <model>] [--env K=V] [--claude-arg A]  Run the sandbox container
   claude              Launch Claude Code directly
   remote              Start Claude Code remote control server
   claude-local <model>  Launch Claude Code with a local Ollama model
