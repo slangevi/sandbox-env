@@ -318,7 +318,7 @@ sandbox login               Authenticate Claude Code for this project
 sandbox start               Start the sandbox in the background
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
-sandbox stop                Stop the running container
+sandbox stop                Stop the running container (interactive and headless)
 sandbox status              Show running sandbox containers
 sandbox logs                Show output from the last headless run
 sandbox models <cmd>        Manage Ollama models (pull, list, rm)
@@ -413,6 +413,13 @@ sandbox run -- "Fix the failing tests"
 ```
 
 Output is saved to `~/.sandbox/logs/<name>/` with timestamps.
+
+A headless run's container is `sandbox-<name>-headless`, so it can run while
+the interactive `sandbox-<name>` is up, and a host-side caller that stops it
+(such as the Matrix bridge) never touches the interactive one. Both use the
+project's volumes, so they share Claude auth, trust and session transcripts.
+Two headless runs of one project still share a name and cannot overlap.
+`sandbox stop` stops both containers.
 
 #### Per-run environment and Claude arguments
 

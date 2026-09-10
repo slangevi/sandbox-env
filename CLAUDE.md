@@ -65,6 +65,12 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
   container-launching command already calls `_build_docker_args`; every
   command that passes args to `claude` already calls `_read_claude_config` —
   so a new command in either category cannot forget to validate.
+- **Container names**: `_build_docker_args <name> [container]` names the
+  container `sandbox-<name>` unless told otherwise; `cmd_run`'s headless path
+  passes `sandbox-<name>-headless` so a headless run (e.g. one started by the
+  Matrix bridge) can coexist with the interactive container and be stopped
+  without touching it. Volumes are always the project's. `cmd_stop` stops both
+  names.
 - **Config tamper protection**: `_build_docker_args` overlays the resolved
   `sandbox.yaml`/`.yml` with a read-only file bind over every container path
   that exposes it (default `/workspace` mount and each ancestor-matching

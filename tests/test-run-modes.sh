@@ -77,6 +77,20 @@ else
     PASS=$((PASS + 1))
 fi
 
+# Test: stop also removes a headless run's container (sandbox-<name>-headless),
+# which lives beside the interactive sandbox-<name>.
+docker run -d --rm --user root --name sandbox-test-project-headless "$IMAGE" sleep 300 >/dev/null
+check "stop with a headless container present" "$SANDBOX" stop
+sleep 1
+if docker container inspect sandbox-test-project-headless &>/dev/null; then
+    echo "  FAIL: headless container still exists after stop"
+    docker rm -f sandbox-test-project-headless >/dev/null 2>&1 || true
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: headless container removed after stop"
+    PASS=$((PASS + 1))
+fi
+
 # Test: readonly mount
 TEST_TMPDIR=$(mktemp -d)
 mkdir -p "$TEST_TMPDIR/data"

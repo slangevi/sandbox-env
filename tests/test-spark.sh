@@ -438,6 +438,19 @@ check_output "run --spark passes the model" "--model qwen3-coder-next" \
 check_output "run --spark keeps the headless prompt" "-p hello" \
     run_dry run --headless --spark qwen3-coder-next -- "hello"
 
+# A headless run gets its own container name so it can run beside the
+# operator's interactive sandbox-<name> (a host-side caller such as the Matrix
+# bridge stops sandbox-<name>-headless and never the interactive one). The
+# volumes stay per-project, so both share auth, trust and session transcripts.
+check_output "run --headless names its container sandbox-<name>-headless" "--name sandbox-spark-argtest-headless " \
+    run_dry run --headless --spark qwen3-coder-next -- "hello"
+
+check_output "claude-spark keeps the plain container name" "--name sandbox-spark-argtest " \
+    run_dry claude-spark qwen3-coder-next
+
+check_output "run --headless keeps the per-project volumes" "sandbox-spark-argtest-claude:/home/node/.claude" \
+    run_dry run --headless --spark qwen3-coder-next -- "hello"
+
 check_output "run --spark requires a model name" "--spark requires a model" \
     run_dry run --headless --spark
 
