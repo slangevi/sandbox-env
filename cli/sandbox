@@ -99,6 +99,14 @@ validate_name() {
         error "Invalid project name '$name'. Must match: ^[a-z0-9][a-z0-9._-]*$"
         exit 1
     fi
+    # sandbox-<name>-headless is the container of <name>'s headless runs, so a
+    # project called <name>-headless would collide with it.
+    case "$name" in
+        *-headless)
+            error "Invalid project name '$name': the -headless suffix is reserved for headless-run containers."
+            exit 1
+            ;;
+    esac
 }
 
 validate_feature() {
@@ -2302,8 +2310,15 @@ cmd_stop() {
     log "Stopping sandbox-${name}..."
     local c
     for c in "sandbox-${name}" "sandbox-${name}-headless"; do
-        docker stop "$c" 2>/dev/null || true
-        docker rm "$c" 2>/dev/null || true
+        if [ "$(docker container inspect --format '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
+            docker stop "$c" >/dev/null 2>&1 || true
+            if [ "$c" = "sandbox-${name}-headless" ]; then
+                warn "Stopped ${c}: that was a headless run (e.g. a Matrix bridge task)."
+            else
+                log "Stopped ${c}."
+            fi
+        fi
+        docker rm "$c" >/dev/null 2>&1 || true
     done
     log "Stopped."
 }
@@ -2631,7 +2646,7 @@ Commands:
   exec <cmd>          Run a command in the running sandbox
   start               Start the sandbox in the background
   shell               Open a shell in the running sandbox
-  stop                Stop the running sandbox
+  stop                Stop the running sandbox (interactive and headless)
   status              Show running sandbox containers
   logs                Show output from the last headless run
   models <cmd>        Manage Ollama models (pull, list, rm)
