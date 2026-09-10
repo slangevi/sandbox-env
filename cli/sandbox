@@ -1203,8 +1203,14 @@ cmd_run() {
         exit 1
     fi
 
-    # Build common docker args
-    _build_docker_args "$name"
+    # Build common docker args. A headless run gets its own container name so it
+    # can run beside the interactive sandbox-<name>, and so a host-side caller
+    # that stops it (the Matrix bridge) can never hit the interactive one.
+    local container="sandbox-${name}"
+    if [ "$mode" = "headless" ]; then
+        container="sandbox-${name}-headless"
+    fi
+    _build_docker_args "$name" "$container"
 
     # Per-run env (operator CLI input), after the config's env so the container
     # sees both; validate_run_env refuses overrides of committed keys.
@@ -1257,7 +1263,7 @@ cmd_run() {
         local log_dir="${HOME}/.sandbox/logs/${name}"
         mkdir -p "$log_dir"
         local log_file="${log_dir}/$(date +%Y%m%d-%H%M%S).log"
-        log "Running sandbox-${name} in headless mode..."
+        log "Running ${container} in headless mode..."
         log "Output will be saved to: $log_file"
 
         local timeout_val
@@ -1323,11 +1329,14 @@ _read_claude_config() {
     fi
 }
 
-# Shared docker args builder — sets global DOCKER_ARGS array
+# Shared docker args builder — sets global DOCKER_ARGS array.
+# $2 names the container (default sandbox-<name>); the volumes are always the
+# project's, so differently named containers share auth, trust and transcripts.
 _build_docker_args() {
     local name="$1"
+    local container="${2:-sandbox-${name}}"
     DOCKER_ARGS=(
-        "--name" "sandbox-${name}"
+        "--name" "$container"
         "--rm"
         "--hostname" "sandbox"
         "--security-opt" "no-new-privileges"
@@ -2291,8 +2300,11 @@ cmd_stop() {
         exit 1
     fi
     log "Stopping sandbox-${name}..."
-    docker stop "sandbox-${name}" 2>/dev/null || true
-    docker rm "sandbox-${name}" 2>/dev/null || true
+    local c
+    for c in "sandbox-${name}" "sandbox-${name}-headless"; do
+        docker stop "$c" 2>/dev/null || true
+        docker rm "$c" 2>/dev/null || true
+    done
     log "Stopped."
 }
 
