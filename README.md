@@ -419,7 +419,9 @@ the interactive `sandbox-<name>` is up, and a host-side caller that stops it
 (such as the Matrix bridge) never touches the interactive one. Both use the
 project's volumes, so they share Claude auth, trust and session transcripts.
 Two headless runs of one project still share a name and cannot overlap.
-`sandbox stop` stops both containers.
+`sandbox stop` stops both containers (and says so when it ended a headless
+run). The `-headless` suffix is therefore reserved: `sandbox build` refuses a
+project named `<something>-headless`.
 
 #### Per-run environment and Claude arguments
 

@@ -77,19 +77,29 @@ else
     PASS=$((PASS + 1))
 fi
 
-# Test: stop also removes a headless run's container (sandbox-<name>-headless),
-# which lives beside the interactive sandbox-<name>.
+# Test: one stop removes both the interactive sandbox-<name> and a headless
+# run's sandbox-<name>-headless, which lives beside it.
+check "start (interactive) before the double stop" "$SANDBOX" start
 docker run -d --rm --user root --name sandbox-test-project-headless "$IMAGE" sleep 300 >/dev/null
-check "stop with a headless container present" "$SANDBOX" stop
-sleep 1
-if docker container inspect sandbox-test-project-headless &>/dev/null; then
-    echo "  FAIL: headless container still exists after stop"
-    docker rm -f sandbox-test-project-headless >/dev/null 2>&1 || true
-    FAIL=$((FAIL + 1))
-else
-    echo "  PASS: headless container removed after stop"
+if [ "$(docker container inspect --format '{{.State.Running}}' sandbox-test-project-headless 2>/dev/null)" = "true" ]; then
+    echo "  PASS: headless stand-in container is running"
     PASS=$((PASS + 1))
+else
+    echo "  FAIL: headless stand-in container did not start"
+    FAIL=$((FAIL + 1))
 fi
+check "stop with both containers present" "$SANDBOX" stop
+sleep 1
+for c in sandbox-test-project sandbox-test-project-headless; do
+    if docker container inspect "$c" &>/dev/null; then
+        echo "  FAIL: $c still exists after stop"
+        docker rm -f "$c" >/dev/null 2>&1 || true
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS: $c removed after stop"
+        PASS=$((PASS + 1))
+    fi
+done
 
 # Test: readonly mount
 TEST_TMPDIR=$(mktemp -d)

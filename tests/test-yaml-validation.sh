@@ -72,6 +72,15 @@ check_output "broken YAML caught" "Invalid YAML" bash -c "cd $TEST_TMPDIR && $SA
 echo "" > "$TEST_TMPDIR/sandbox.yaml"
 check_fails "empty YAML fails" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
 
+# The -headless suffix is reserved: project "foo-headless" would name its
+# interactive container sandbox-foo-headless, which is project foo's headless
+# run's container.
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
+name: foo-headless
+EOF
+check_output "reserved -headless suffix rejected" "reserved" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+check_fails "reserved -headless suffix fails the build" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+
 # Test: valid YAML with no features (should work)
 cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
 name: minimal-test
