@@ -81,6 +81,10 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
   both `sandbox.yaml` and `sandbox.yml` exist, closing the precedence hole the
   overlay alone can't (an agent creating a new `sandbox.yaml` next to a
   protected `sandbox.yml`).
+- **`cmd_trust`** writes `.projects["/workspace"].hasTrustDialogAccepted = true`
+  into `.claude.json` in the project's Claude volume by running `jq` inside
+  `sandbox-base:latest` with the volume mounted (the host may not have `jq`).
+  Idempotent. Headless callers (the Matrix bridge) run it after `sandbox build`.
 
 **`base/entrypoint.sh`** — Runs as root on container start. Does: firewall init (if strict), Ollama service start (if installed), persistent volume symlinks (history, gitconfig, .config, .local, npm prefix), git config from SANDBOX_GIT_* env vars, then `exec gosu node "$@"` to drop privileges.
 
