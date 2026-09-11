@@ -423,6 +423,13 @@ Two headless runs of one project still share a name and cannot overlap.
 run). The `-headless` suffix is therefore reserved: `sandbox build` refuses a
 project named `<something>-headless`.
 
+Headless runs never see Claude Code's trust dialog, and until `/workspace` is
+trusted the project's `.claude/settings.json` (its permission allowlist) is
+silently ignored. `sandbox trust` sets the flag in the project's Claude volume
+(`sandbox-<name>-claude`), so a fresh project can run headless with its
+allowlist honoured. Idempotent; run it once after the first `sandbox build`,
+and again after `sandbox clean`, which removes the volume.
+
 #### Per-run environment and Claude arguments
 
 A host-side caller (for example the Matrix bridge from `agent-matrix-mcp`) can

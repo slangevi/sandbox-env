@@ -101,6 +101,15 @@ for c in sandbox-test-project sandbox-test-project-headless; do
     fi
 done
 
+# Test: trust marks /workspace trusted in the project's Claude volume, idempotently.
+# Headless runs never see Claude's trust dialog, and without the flag the
+# project's .claude/settings.json allowlist is silently ignored.
+cd "$FIXTURES"
+check_output "trust sets the flag" '"hasTrustDialogAccepted":true' "$SANDBOX" trust
+check_output "trust is idempotent" '"hasTrustDialogAccepted":true' "$SANDBOX" trust
+check_output "trust leaves valid JSON with the /workspace project" '"/workspace"' \
+    docker run --rm --entrypoint sh -v sandbox-test-project-claude:/c sandbox-base:latest -c 'jq -c ".projects | keys" /c/.claude.json'
+
 # Test: readonly mount
 TEST_TMPDIR=$(mktemp -d)
 mkdir -p "$TEST_TMPDIR/data"

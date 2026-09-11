@@ -2385,6 +2385,37 @@ cmd_login() {
         claude login
 }
 
+cmd_trust() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
+        error "Base image not found. Run 'sandbox build-base' first."
+        exit 1
+    fi
+    # Claude Code honours a project's .claude/settings.json (the permission
+    # allowlist) only once /workspace is trusted. Interactive sessions ask on
+    # first launch; headless runs never do, so set the flag directly in the
+    # project's Claude volume. Idempotent; the volume is created if missing.
+    docker run --rm --entrypoint sh -v "sandbox-${name}-claude:/c" sandbox-base:latest -c '
+        f=/c/.claude.json
+        [ -f "$f" ] || echo "{}" > "$f"
+        t=$(mktemp) || exit 1
+        if jq ".projects[\"/workspace\"].hasTrustDialogAccepted = true" "$f" > "$t"; then
+            cat "$t" > "$f"
+        else
+            rm -f "$t"; exit 1
+        fi
+        rm -f "$t"
+        chown 1000:1000 "$f"
+        jq -c ".projects[\"/workspace\"]" "$f"'
+    log "Marked /workspace trusted for sandbox-${name}."
+}
+
 cmd_logs() {
     find_config
     local name
@@ -2643,6 +2674,7 @@ Commands:
   llm [--spark] [args]  Run the llm CLI in the sandbox
   spark-status [model]  Show sparkyard backend config (and check a model)
   login               Authenticate Claude Code for this project
+  trust               Mark /workspace trusted for headless runs (sets the flag in the Claude volume)
   exec <cmd>          Run a command in the running sandbox
   start               Start the sandbox in the background
   shell               Open a shell in the running sandbox
@@ -2675,6 +2707,7 @@ case "${1:-help}" in
     llm)            shift; cmd_llm "$@" ;;
     spark-status)   shift; cmd_spark_status "$@" ;;
     login)          cmd_login ;;
+    trust)          cmd_trust ;;
     exec)           cmd_exec "$@" ;;
     start)          cmd_start ;;
     shell)          cmd_shell ;;
