@@ -43,6 +43,7 @@ features:
   - python
 EOF
 check_fails "build fails without name field" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+check_fails "trust fails without a name field" bash -c "cd $TEST_TMPDIR && $SANDBOX trust"
 
 # Missing feature script
 cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'

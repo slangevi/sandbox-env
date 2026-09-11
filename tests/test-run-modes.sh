@@ -109,6 +109,7 @@ check_output "trust sets the flag" '"hasTrustDialogAccepted":true' "$SANDBOX" tr
 check_output "trust is idempotent" '"hasTrustDialogAccepted":true' "$SANDBOX" trust
 check_output "trust leaves valid JSON with the /workspace project" '"/workspace"' \
     docker run --rm --entrypoint sh -v sandbox-test-project-claude:/c sandbox-base:latest -c 'jq -c ".projects | keys" /c/.claude.json'
+check "trust exits 0 on success" "$SANDBOX" trust
 
 # Test: readonly mount
 TEST_TMPDIR=$(mktemp -d)
