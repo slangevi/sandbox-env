@@ -315,6 +315,7 @@ sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox llm [--spark] [args] Run the llm CLI in the sandbox, or against sparkyard with --spark
 sandbox spark-status [model] Show sparkyard backend config (and check a model)
 sandbox login               Authenticate Claude Code for this project
+sandbox trust               Mark /workspace trusted for headless runs (enables the .claude/settings.json allowlist)
 sandbox start               Start the sandbox in the background
 sandbox exec <cmd>          Run a command in a running container
 sandbox shell               Open a shell in a running container
