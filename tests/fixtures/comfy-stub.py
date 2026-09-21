@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Stub ComfyUI for tests. Serves the handful of endpoints `comfy` uses.
+
+Usage: comfy-stub.py <port> <state-dir>
+Records each /prompt body to <state-dir>/last-prompt.json so tests can assert
+exactly what the helper submitted, including JSON types.
+"""
+import json
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+
+PORT = int(sys.argv[1])
+STATE = sys.argv[2]
+
+MODELS = {
+    "checkpoints": ["v1-5-pruned-emaonly-fp16.safetensors"],
+    "loras": [],
+    "vae": ["vae-ft-mse.safetensors"],
+}
+
+# Flipped by /_stub/fail-exec so one test can drive the error path.
+STATE_FLAGS = {"exec_error": False, "pending_forever": False}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        p, q = u.path, parse_qs(u.query)
+        if p == "/system_stats":
+            return self._send(200, {
+                "system": {"os": "linux", "comfyui_version": "0.33.1",
+                           "python_version": "3.12.3 (main)"},
+                "devices": [{"name": "stub cuda:0", "type": "cuda",
+                             "vram_total": 130596048896, "vram_free": 76522124646}],
+            })
+        if p == "/queue":
+            return self._send(200, {"queue_running": [], "queue_pending": []})
+        if p == "/models":
+            return self._send(200, list(MODELS))
+        if p.startswith("/models/"):
+            folder = p[len("/models/"):]
+            if folder not in MODELS:
+                return self._send(404, {"error": "no such folder"})
+            return self._send(200, MODELS[folder])
+        if p.startswith("/history/"):
+            pid = p[len("/history/"):]
+            if STATE_FLAGS["pending_forever"]:
+                return self._send(200, {})
+            if STATE_FLAGS["exec_error"]:
+                return self._send(200, {pid: {"status": {
+                    "status_str": "error",
+                    "messages": [["execution_error", {
+                        "node_id": "3", "node_type": "KSampler",
+                        "exception_message": "stub blew up",
+                    }]],
+                }}})
+            return self._send(200, {pid: {
+                "status": {"status_str": "success"},
+                "outputs": {"9": {"images": [
+                    {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"},
+                    # A hostile filename: the helper must write a basename only.
+                    {"filename": "../../escape.png", "subfolder": "", "type": "output"},
+                ]}},
+            }})
+        if p == "/view":
+            data = b"\x89PNG\r\n\x1a\n" + q.get("filename", [""])[0].encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n)
+        if u.path == "/prompt":
+            with open(os.path.join(STATE, "last-prompt.json"), "wb") as fh:
+                fh.write(raw)
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                return self._send(400, {"error": {"message": "invalid json"}})
+            if "prompt" not in body:
+                return self._send(400, {"error": {"message": "missing prompt"}})
+            return self._send(200, {"prompt_id": "stub-prompt-1", "number": 1})
+        if u.path == "/interrupt":
+            return self._send(200, {})
+        if u.path == "/upload/image":
+            return self._send(200, {"name": "uploaded.png", "subfolder": "", "type": "input"})
+        if u.path == "/_stub/fail-exec":
+            STATE_FLAGS["exec_error"] = True
+            return self._send(200, {"ok": True})
+        if u.path == "/_stub/pending":
+            STATE_FLAGS["pending_forever"] = True
+            return self._send(200, {"ok": True})
+        self._send(404, {"error": "not found"})
+
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

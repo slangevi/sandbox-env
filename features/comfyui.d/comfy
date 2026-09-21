@@ -1,0 +1,90 @@
+#!/bin/bash
+# comfy — drive a ComfyUI instance from inside a sandbox.
+#
+# Deliberately NOT `set -e`: this script owns its exit codes (see EX_* below)
+# and an inherited errexit would turn a handled HTTP failure into a bare
+# non-zero exit with no message.
+set -uo pipefail
+
+EX_USAGE=1
+EX_UNREACHABLE=2
+EX_EXEC=3
+EX_TIMEOUT=4
+
+COMFYUI_URL="${COMFYUI_URL:-}"
+COMFY_WORKFLOWS="${COMFY_WORKFLOWS:-/opt/comfy-workflows}"
+HTTP_TIMEOUT="${COMFY_HTTP_TIMEOUT:-60}"
+
+die() { printf 'comfy: %s\n' "$1" >&2; exit "${2:-$EX_USAGE}"; }
+
+require_url() {
+    [ -n "$COMFYUI_URL" ] && return 0
+    die "not wired into this sandbox — COMFYUI_URL is unset.
+  Add 'comfyui' to features: in sandbox.yaml, make sure the ComfyUI container
+  is running, then restart the sandbox." "$EX_USAGE"
+}
+
+# api_get <path> -> body on stdout. Exits 2 on any transport or non-200 result.
+api_get() {
+    local path="$1" body code
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        -w '\n%{http_code}' "${COMFYUI_URL}${path}" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    [ "$code" = "200" ] || die "ComfyUI returned HTTP $code for $path" "$EX_UNREACHABLE"
+    printf '%s' "$body"
+}
+
+cmd_status() {
+    require_url
+    local stats queue
+    stats=$(api_get /system_stats) || exit $?
+    queue=$(api_get /queue) || exit $?
+    jq -r --argjson q "$queue" --arg url "$COMFYUI_URL" '
+        "ComfyUI \(.system.comfyui_version) at \($url)",
+        "device: \(.devices[0].name // "none")",
+        "vram:   \(((.devices[0].vram_free // 0) / 1073741824) | floor)Gi free " +
+        "of \(((.devices[0].vram_total // 0) / 1073741824) | floor)Gi",
+        "queue:  \($q.queue_running | length) running, \($q.queue_pending | length) pending"
+    ' <<<"$stats"
+}
+
+cmd_models() {
+    require_url
+    local folders folder names
+    if [ $# -gt 0 ]; then
+        folders="$1"
+    else
+        folders=$(api_get /models | jq -r '.[]') || exit $?
+    fi
+    while IFS= read -r folder; do
+        [ -z "$folder" ] && continue
+        names=$(api_get "/models/$folder" | jq -r '.[]?') || exit $?
+        [ -z "$names" ] && continue
+        printf '%s:\n' "$folder"
+        while IFS= read -r one; do
+            [ -n "$one" ] && printf '  %s\n' "$one"
+        done <<<"$names"
+    done <<<"$folders"
+}
+
+usage() {
+    cat <<'USAGE'
+comfy — generate images and video through a ComfyUI instance
+
+  comfy status                 ComfyUI version, device, free VRAM, queue depth
+  comfy models [FOLDER]        installed models, by folder
+
+Environment:
+  COMFYUI_URL        base URL of the ComfyUI API (set by the sandbox CLI)
+  COMFY_WORKFLOWS    directory of shared workflows (default /opt/comfy-workflows)
+USAGE
+}
+
+case "${1:-help}" in
+    status)         shift; cmd_status "$@" ;;
+    models)         shift; cmd_models "$@" ;;
+    help|-h|--help) usage ;;
+    *)              printf 'comfy: unknown command: %s\n\n' "$1" >&2; usage >&2; exit "$EX_USAGE" ;;
+esac
