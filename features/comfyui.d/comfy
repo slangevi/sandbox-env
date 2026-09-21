@@ -196,7 +196,7 @@ download_outputs() {
         # Filenames come from ComfyUI — i.e. off the network. Reduce to a
         # basename BEFORE the value is ever used as a local path.
         safe=$(basename -- "$fn")
-        case "$safe" in ""|.|..) continue ;; esac
+        case "$safe" in ""|.|..|/) continue ;; esac
         dest="$out/$safe"
         n=1
         while [ -e "$dest" ]; do
@@ -218,6 +218,22 @@ download_outputs() {
 }
 
 # ── run ──────────────────────────────────────────────────────────────
+
+# find_supplied <dkey> <dpath> <pair>... -> prints the matching pair's
+# value and returns 0 if <dkey> (a manifest parameter name) or <dpath>
+# (the raw node path it maps to) was supplied via --set. Matched by an
+# exact key comparison against each pair's own key — never a substring
+# of the joined argv — so a value containing "=" or another parameter's
+# name can't forge a match. Returns 1 if neither was supplied.
+find_supplied() {
+    local dkey="$1" dpath="$2" p; shift 2
+    for p in "$@"; do
+        case "${p%%=*}" in
+            "$dkey"|"$dpath") printf '%s' "${p#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
 
 # run_workflow <workflow> <outdir> <timeout> <json:0|1> [key=value ...]
 run_workflow() {
@@ -260,19 +276,24 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
             validate_model_value "$folder" "$value"
             type="string"
         fi
-        [ "$key" = "seed" ] && seed_used="$value"
         graph=$(set_in_graph "$graph" "$path" "$type" "$value") || exit $?
     done
 
     # Manifest defaults for anything not overridden above.
     if [ -f "$mf" ]; then
-        local dkey dpath dtype ddefault dfolder current
+        local dkey dpath dtype ddefault dfolder current supplied
         while IFS= read -r dkey; do
             [ -z "$dkey" ] && continue
             dpath=$(jq -r --arg k "$dkey" '.params[$k].path' "$mf")
             # Skip if already supplied, whether by manifest name (prompt=...)
-            # or by the raw node path it maps to (6.inputs.text=...).
-            case " $* " in *" $dkey="*|*" $dpath="*) continue ;; esac
+            # or by the raw node path it maps to (6.inputs.text=...). Matched
+            # by an exact key comparison (never a substring of the joined
+            # argv), so a value containing "=" or another param's name can't
+            # forge a match.
+            if supplied=$(find_supplied "$dkey" "$dpath" "$@"); then
+                [ "$dkey" = "seed" ] && seed_used="$supplied"
+                continue
+            fi
             dtype=$(jq -r --arg k "$dkey" '.params[$k].type // "string"' "$mf")
             dfolder=$(jq -r --arg k "$dkey" '.params[$k].folder // empty' "$mf")
             ddefault=$(jq -r --arg k "$dkey" '.params[$k].default // empty' "$mf")
@@ -283,11 +304,11 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
                     'getpath($p) // ""' <<<"$graph")
                 case "$current" in
                     ""|__*__)
-                        ddefault=$(first_model "$dfolder")
+                        ddefault=$(first_model "$dfolder") || exit $?
                         [ -n "$ddefault" ] \
                             || die "no models installed in $dfolder — nothing to generate with" "$EX_USAGE"
                         printf 'comfy: using %s from %s\n' "$ddefault" "$dfolder" >&2
-                        graph=$(set_in_graph "$graph" "$dpath" "string" "$ddefault")
+                        graph=$(set_in_graph "$graph" "$dpath" "string" "$ddefault") || exit $?
                         ;;
                 esac
                 continue
@@ -304,10 +325,9 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
         missing=$(jq -r '.params | to_entries[] | select(.value.required == true) | .key' "$mf")
         while IFS= read -r dkey; do
             [ -z "$dkey" ] && continue
-            case " $* " in
-                *" $dkey="*) ;;
-                *) die "'$dkey' is required by $(basename "$mf"). Add --set $dkey=..." "$EX_USAGE" ;;
-            esac
+            dpath=$(jq -r --arg k "$dkey" '.params[$k].path' "$mf")
+            find_supplied "$dkey" "$dpath" "$@" >/dev/null \
+                || die "'$dkey' is required by $(basename "$mf"). Add --set $dkey=..." "$EX_USAGE"
         done <<<"$missing"
     fi
 
@@ -322,7 +342,12 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
     elapsed=$((SECONDS - start))
 
     if [ "$want_json" = "1" ]; then
-        jq -n --arg id "$pid" --arg seed "$seed_used" --argjson el "$elapsed" \
+        # Report the seed as a real JSON number when it is one: this is a
+        # reproducibility field, and "42" the string is a needless surprise
+        # in a task whose whole point is that the graph must carry 42.
+        local seed_json
+        if [[ "$seed_used" =~ ^-?[0-9]+$ ]]; then seed_json="$seed_used"; else seed_json="null"; fi
+        jq -n --arg id "$pid" --argjson seed "$seed_json" --argjson el "$elapsed" \
             --argjson files "$(printf '%s\n' "$files" | jq -R -s 'split("\n") | map(select(length > 0))')" \
             '{prompt_id: $id, status: "success", seed: $seed, elapsed: $el, files: $files}'
     else
@@ -345,6 +370,11 @@ cmd_run() {
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
+    # A non-numeric timeout would make wait_for_job's "$waited" -ge "$timeout"
+    # comparison error out every iteration and poll forever — a hang is
+    # worse than any error for an agent-driven tool, so refuse it up front.
+    [[ "$timeout" =~ ^[0-9]+$ ]] \
+        || die "--timeout must be a non-negative integer (got '$timeout')" "$EX_USAGE"
     local wf
     wf=$(resolve_workflow "$ref") || exit $?
     run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"

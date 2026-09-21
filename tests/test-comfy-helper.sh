@@ -117,20 +117,31 @@ check_status "uninstalled model exits 1" 1 \
     "$COMFY" run minimal-txt2img --set prompt=x --set checkpoint=nope.safetensors
 
 echo "-- outputs --"
-OUT3="$TMP/out3"
+# Nested two levels under $TMP so the stub's "../../escape.png" traversal
+# target, if it ever escaped, resolves to exactly $TMP/escape.png below —
+# the same path the assertion checks. (A shallower nesting would let a
+# traversal escape somewhere the assertion never looks, proving nothing.)
+OUT3="$TMP/deep/out3"
 "$COMFY" run minimal-txt2img --set prompt=x --out "$OUT3" >/dev/null 2>&1
 check_output "output file written" "ComfyUI_00001_.png" ls "$OUT3"
 check_output "traversing filename reduced to a basename" "escape.png" ls "$OUT3"
 check_status "nothing escaped the output directory" 1 test -e "$TMP/escape.png"
-check_status "nothing escaped two levels up" 1 test -e "$SCRIPT_DIR/escape.png"
 
 echo "-- json output --"
 check_output "json carries prompt_id" "stub-prompt-1" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out4" --json
-check_output "json carries the resolved seed" "seed" \
-    "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out5" --json
+check_output "json carries the resolved seed as a number" '"seed": 99' \
+    "$COMFY" run minimal-txt2img --set prompt=x --set seed=99 --out "$TMP/out5" --json
 check_output "json lists written files" "ComfyUI_00001_.png" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out6" --json
+
+echo "-- raw node path parity with manifest names --"
+check_not_output "raw path satisfies a required manifest param" "is required" \
+    "$COMFY" run minimal-txt2img --set 6.inputs.text=hi --out "$TMP/outreq"
+check_status "raw path satisfying a required param exits 0" 0 \
+    "$COMFY" run minimal-txt2img --set 6.inputs.text=hi --out "$TMP/outreq2"
+check_output "raw node path seed reaches the json seed field" '"seed": 777' \
+    "$COMFY" run minimal-txt2img --set prompt=x --set 3.inputs.seed=777 --out "$TMP/outseed" --json
 
 echo "-- failure paths --"
 curl -sS -X POST "$COMFYUI_URL/_stub/pending" >/dev/null
@@ -139,9 +150,19 @@ check_output "timeout names the fetch escape hatch" "comfy fetch" \
 # Interrupt mid-poll: the job id must survive into the message.
 ( "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/outint" --timeout 60 >/dev/null 2>"$TMP/int.err" &
   RUNPID=$!; sleep 3; kill -INT "$RUNPID" 2>/dev/null; wait "$RUNPID" 2>/dev/null ) || true
-check_output "interrupt names the fetch escape hatch" "comfy fetch" cat "$TMP/int.err"
+check_output "interrupt names the actual prompt id" "comfy fetch stub-prompt-1" cat "$TMP/int.err"
 check_status "timeout exits 4" 4 \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out8" --timeout 2
+
+check_output "non-numeric timeout is refused" "must be a non-negative integer" \
+    "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
+check_status "non-numeric timeout exits 1, not a hang" 1 \
+    "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
+check_status "non-numeric COMFY_JOB_TIMEOUT exits 1, not a hang" 1 \
+    env COMFY_JOB_TIMEOUT=abc "$COMFY" run minimal-txt2img --set prompt=x
+
+check_status "run against unreachable ComfyUI exits 2, not 1" 2 \
+    env COMFYUI_URL="http://127.0.0.1:1" "$COMFY" run minimal-txt2img --set prompt=x
 
 # Restart the stub so the pending flag clears, then drive the error path.
 kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
@@ -156,6 +177,21 @@ check_output "execution error names the node" "KSampler" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out9"
 check_status "execution error exits 3" 3 \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out10"
+
+echo "-- injection safety --"
+# Every value crosses into JSON via jq --arg / --argjson, never a shell
+# eval or hand-built string, so this should round-trip byte-identical and
+# execute nothing — regardless of what it looks like to a shell.
+HOSTILE='a "q" \ $(touch injected-X) `id`'
+rm -f "$SCRIPT_DIR/injected-X" "./injected-X" 2>/dev/null
+"$COMFY" run minimal-txt2img --set prompt="$HOSTILE" --out "$TMP/outhostile" >/dev/null 2>&1
+check_status "hostile prompt round-trips byte-identical" 0 \
+    jq -e --arg want "$HOSTILE" '.prompt["6"].inputs.text == $want' "$TMP/last-prompt.json"
+check_status "hostile prompt's command substitution never executed" 1 \
+    test -e "$SCRIPT_DIR/injected-X"
+check_status "hostile prompt's command substitution never executed in cwd" 1 \
+    test -e "./injected-X"
+rm -f "$SCRIPT_DIR/injected-X" "./injected-X" 2>/dev/null
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
