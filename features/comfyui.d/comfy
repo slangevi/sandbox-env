@@ -279,10 +279,14 @@ find_supplied() {
     return 1
 }
 
-# run_workflow <workflow> <outdir> <timeout> <json:0|1> [key=value ...]
+# run_workflow <workflow> <outdir> <timeout> <json:0|1> <wait:0|1> [key=value ...]
+# With <wait> 0 the job is submitted and its prompt id reported, and neither
+# wait_for_job nor download_outputs runs — `comfy job` and `comfy fetch` pick
+# it up later. That is the point of the flag: a long video render outlives any
+# reasonable --timeout, and blocking on it ties up the agent for nothing.
 run_workflow() {
-    local wf="$1" out="$2" timeout="$3" want_json="$4"; shift 4
-    local mf graph pid seed_used="" files elapsed start
+    local wf="$1" out="$2" timeout="$3" want_json="$4" want_wait="$5"; shift 5
+    local mf graph pid seed_used="" files elapsed start seed_json
 
     assert_api_format "$wf"
     mf=$(manifest_path "$wf")
@@ -377,6 +381,27 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
 
     start=$SECONDS
     pid=$(submit_graph "$graph") || exit $?
+
+    # Report the seed as a real JSON number when it is one: this is a
+    # reproducibility field, and "42" the string is a needless surprise
+    # in a task whose whole point is that the graph must carry 42.
+    if [[ "$seed_used" =~ ^-?[0-9]+$ ]]; then seed_json="$seed_used"; else seed_json="null"; fi
+
+    if [ "$want_wait" = "0" ]; then
+        # The id is the whole deliverable here, so it goes to stdout alone
+        # and the follow-up hint goes to stderr — a caller doing
+        # `pid=$(comfy run ... --no-wait)` must get the id and nothing else.
+        printf 'comfy: submitted; not waiting. Follow it with:\n  comfy job %s --wait\n  comfy fetch %s\n' \
+            "$pid" "$pid" >&2
+        if [ "$want_json" = "1" ]; then
+            jq -n --arg id "$pid" --argjson seed "$seed_json" \
+                '{prompt_id: $id, status: "submitted", seed: $seed}'
+        else
+            printf '%s\n' "$pid"
+        fi
+        return 0
+    fi
+
     # Ctrl-C between submission and completion must not lose the job: it is
     # still running on the GPU and its outputs are still retrievable.
     trap 'printf "\ncomfy: interrupted. The job may still be running:\n  comfy fetch %s\n" "$pid" >&2; exit 130' INT
@@ -386,11 +411,6 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
     elapsed=$((SECONDS - start))
 
     if [ "$want_json" = "1" ]; then
-        # Report the seed as a real JSON number when it is one: this is a
-        # reproducibility field, and "42" the string is a needless surprise
-        # in a task whose whole point is that the graph must carry 42.
-        local seed_json
-        if [[ "$seed_used" =~ ^-?[0-9]+$ ]]; then seed_json="$seed_used"; else seed_json="null"; fi
         jq -n --arg id "$pid" --argjson seed "$seed_json" --argjson el "$elapsed" \
             --argjson files "$(printf '%s\n' "$files" | jq -R -s 'split("\n") | map(select(length > 0))')" \
             '{prompt_id: $id, status: "success", seed: $seed, elapsed: $el, files: $files}'
@@ -401,9 +421,9 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
 
 cmd_run() {
     require_url
-    [ $# -gt 0 ] || die "usage: comfy run <workflow|path> [--set key=value]... [--out DIR]" "$EX_USAGE"
+    [ $# -gt 0 ] || die "usage: comfy run <workflow|path> [--set key=value]... [--out DIR] [--no-wait]" "$EX_USAGE"
     local ref="$1"; shift
-    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
+    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0 want_wait=1
     local sets=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -411,13 +431,17 @@ cmd_run() {
             --out)     out="$2"; shift 2 ;;
             --timeout) timeout="$2"; shift 2 ;;
             --json)    want_json=1; shift ;;
+            --no-wait) want_wait=0; shift ;;
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
+    # Still validated under --no-wait: the value is inert on that path, but a
+    # typo'd --timeout must not be silently accepted by one spelling of the
+    # command and refused by the other.
     require_numeric_timeout "$timeout"
     local wf
     wf=$(resolve_workflow "$ref") || exit $?
-    run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
+    run_workflow "$wf" "$out" "$timeout" "$want_json" "$want_wait" "${sets[@]+"${sets[@]}"}"
 }
 
 cmd_status() {
@@ -497,7 +521,10 @@ generate() {
     require_numeric_timeout "$timeout"
     local wf
     wf=$(workflow_for_tag "$tag") || exit $?
-    run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
+    # Always waits: --no-wait is a `comfy run` flag (see the spec's command
+    # table). txt2img/video are the convenience wrappers, and their whole
+    # value is "one command, files on disk".
+    run_workflow "$wf" "$out" "$timeout" "$want_json" 1 "${sets[@]+"${sets[@]}"}"
 }
 
 cmd_txt2img() { require_url; generate txt2img "$@"; }
@@ -556,16 +583,25 @@ cmd_upload() {
             *)      die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
-    # --name is agent-controlled input that lands in a curl -F field
-    # ("image=@${file};filename=${name}"): a ';', '=', '"' or newline in it
-    # would alter curl's own multipart-field parsing, not just the remote
-    # filename. This is not shell or JSON injection (Task 3's protections
-    # don't cover it), so it gets its own check here. Reducing to a
-    # basename first also keeps a path out of the field.
+    # Both halves of the curl -F field ("image=@${file};filename=${name}") are
+    # agent-controlled input, and a ';', '=', '"' or newline in EITHER alters
+    # curl's own multipart-field parsing, not just the remote filename. This is
+    # not shell or JSON injection (Task 3's protections don't cover it), so it
+    # gets its own check here. Validating only --name would leave the guard
+    # looking stronger than it is: a local path containing ';' or '=' reaches
+    # exactly the same field. Reducing --name to a basename first also keeps a
+    # path out of the field; $file cannot be reduced that way — it has to stay
+    # the path curl opens.
     name=$(basename -- "$name")
     case "$name" in
         *';'*|*'='*|*'"'*|*$'\n'*)
             die "--name must not contain ';', '=', '\"', or a newline (got '$name')" "$EX_USAGE" ;;
+    esac
+    case "$file" in
+        *';'*|*'='*|*'"'*|*$'\n'*)
+            die "the file path must not contain ';', '=', '\"', or a newline (got '$file').
+  Those characters split curl's multipart field. Copy the file to a plain
+  path first, then upload that." "$EX_USAGE" ;;
     esac
     local body code
     body=$(curl -sS --connect-timeout 5 --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" \
@@ -609,6 +645,8 @@ comfy — generate images and video through a ComfyUI instance
   comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
   comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
       [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
+      [--no-wait]                   submit only; print the prompt id and return
+                                    (collect it later with job/fetch)
 
   comfy job ID [--wait] [--json]    status of a queued job
   comfy fetch ID [--out DIR]        download a finished job's outputs

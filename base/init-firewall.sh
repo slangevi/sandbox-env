@@ -39,7 +39,14 @@ ipset create allowed-domains hash:net
 
 # 6. GitHub IPs via /meta API
 echo "Fetching GitHub IP ranges..."
-gh_ranges=$(curl -sf https://api.github.com/meta)
+# `|| gh_ranges=""` is load-bearing under `set -e`: curl -sf exits non-zero on
+# any transient GitHub failure (5xx, rate limit, DNS hiccup), which would abort
+# this whole script and leave the container with no firewall at all — and would
+# make the WARNING branch below unreachable, though that branch is the author's
+# own statement that warn-and-continue is the intent. `sandbox comfy` starts a
+# fresh strict container per invocation, so without this a GitHub blip breaks
+# every image generation, not just a session start.
+gh_ranges=$(curl -sf https://api.github.com/meta) || gh_ranges=""
 if [ -n "$gh_ranges" ] && echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null 2>&1; then
     while read -r cidr; do
         ipset add allowed-domains "$cidr" 2>/dev/null || true

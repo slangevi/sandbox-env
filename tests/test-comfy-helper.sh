@@ -154,15 +154,35 @@ check_output "interrupt names the actual prompt id" "comfy fetch stub-prompt-1" 
 check_status "timeout exits 4" 4 \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out8" --timeout 2
 
+# These three run while the stub is still in pending_forever mode, so a
+# regression in require_numeric_timeout would poll until something kills it.
+# Bounded with `timeout 10` — exactly as the `job --wait` pair near the end of
+# this file is — so the regression net reports a failure instead of BEING the
+# hang: unwrapped, neutering require_numeric_timeout wedged this suite with no
+# output at all until the harness killed it at 120s, which in CI hangs the job.
 check_output "non-numeric timeout is refused" "must be a non-negative integer" \
-    "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
+    timeout 10 "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
 check_status "non-numeric timeout exits 1, not a hang" 1 \
-    "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
+    timeout 10 "$COMFY" run minimal-txt2img --set prompt=x --timeout abc
 check_status "non-numeric COMFY_JOB_TIMEOUT exits 1, not a hang" 1 \
-    env COMFY_JOB_TIMEOUT=abc "$COMFY" run minimal-txt2img --set prompt=x
+    timeout 10 env COMFY_JOB_TIMEOUT=abc "$COMFY" run minimal-txt2img --set prompt=x
 
 check_status "run against unreachable ComfyUI exits 2, not 1" 2 \
     env COMFYUI_URL="http://127.0.0.1:1" "$COMFY" run minimal-txt2img --set prompt=x
+
+# The stub is still in pending_forever mode here, which is exactly the case
+# --no-wait exists for: a job that will not finish inside any --timeout the
+# caller would sit through. A waiting run exits 4 after its timeout (above);
+# --no-wait must come straight back with the id instead. `timeout 10` so a
+# regression fails loudly rather than wedging the suite.
+check_status "--no-wait returns immediately on a job that never finishes" 0 \
+    timeout 10 "$COMFY" run minimal-txt2img --set prompt=x --no-wait --out "$TMP/outnw-pending"
+check_output "...and still reports the prompt id" "stub-prompt-1" \
+    timeout 10 "$COMFY" run minimal-txt2img --set prompt=x --no-wait --out "$TMP/outnw-pending"
+# --timeout is inert under --no-wait but must still be validated, so one
+# spelling of the command can't quietly accept what the other refuses.
+check_status "--no-wait still refuses a non-numeric --timeout" 1 \
+    timeout 10 "$COMFY" run minimal-txt2img --set prompt=x --no-wait --timeout abc
 
 # Restart the stub so the pending flag clears, then drive the error path.
 kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
@@ -243,6 +263,34 @@ check_output "job --wait non-numeric timeout is refused" "must be a non-negative
 check_status "job --wait non-numeric timeout exits 1, not a hang" 1 \
     timeout 10 "$COMFY" job stub-prompt-1 --wait --timeout abc
 
+echo "-- no-wait, then job and fetch --"
+# The submit / collect-later path the spec's command table calls for, and the
+# reason `comfy job` and `comfy fetch` exist as separate commands at all.
+NW_OUT="$TMP/outnw"
+"$COMFY" run minimal-txt2img --set prompt=x --no-wait --out "$NW_OUT" \
+    >"$TMP/nowait.out" 2>"$TMP/nowait.err"
+check_output "--no-wait prints the prompt id, and only that, on stdout" \
+    "^stub-prompt-1\$" cat "$TMP/nowait.out"
+check_output "...with the follow-up hint on stderr instead" \
+    "comfy fetch stub-prompt-1" cat "$TMP/nowait.err"
+check_status "...and downloads nothing (the output directory is never created)" 1 \
+    test -e "$NW_OUT"
+check_status "--no-wait exits 0" 0 \
+    "$COMFY" run minimal-txt2img --set prompt=x --no-wait --out "$TMP/outnw2"
+check_output "--no-wait --json reports status submitted" '"status": "submitted"' \
+    "$COMFY" run minimal-txt2img --set prompt=x --no-wait --json
+check_output "--no-wait --json carries the prompt id" '"prompt_id": "stub-prompt-1"' \
+    "$COMFY" run minimal-txt2img --set prompt=x --no-wait --json
+check_output "--no-wait --json carries the resolved seed as a number" '"seed": 99' \
+    "$COMFY" run minimal-txt2img --set prompt=x --set seed=99 --no-wait --json
+# The round trip that follows a --no-wait submission.
+check_output "job picks the submitted id up afterwards" "stub-prompt-1 success" \
+    "$COMFY" job stub-prompt-1
+"$COMFY" fetch stub-prompt-1 --out "$TMP/nwfetch" >/dev/null 2>&1
+check_output "fetch then retrieves its outputs" "ComfyUI_00001_.png" ls "$TMP/nwfetch"
+check_status "fetch after --no-wait exits 0" 0 \
+    "$COMFY" fetch stub-prompt-1 --out "$TMP/nwfetch2"
+
 echo "-- upload and cancel --"
 echo "fake" > "$TMP/in.png"
 check_output "upload reports the stored name" "uploaded.png" "$COMFY" upload "$TMP/in.png"
@@ -256,6 +304,13 @@ check_output "upload rejects a hostile --name" "must not contain" \
     "$COMFY" upload "$TMP/in.png" --name 'evil.png;filename=hack.sh'
 check_status "upload rejects a hostile --name exits 1" 1 \
     "$COMFY" upload "$TMP/in.png" --name 'evil.png;filename=hack.sh'
+# The file path lands in the same field, so it gets the same guard — otherwise
+# the --name check above reads as stronger protection than it actually is.
+cp "$TMP/in.png" "$TMP/in;filename=hack.sh.png"
+check_output "upload rejects a hostile file path too" "must not contain" \
+    "$COMFY" upload "$TMP/in;filename=hack.sh.png"
+check_status "upload rejects a hostile file path exits 1" 1 \
+    "$COMFY" upload "$TMP/in;filename=hack.sh.png"
 check_status "cancel succeeds" 0 "$COMFY" cancel
 
 echo ""

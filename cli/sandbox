@@ -1095,8 +1095,10 @@ _load_comfy_env() {
     COMFY_WORKFLOWS_OVERRIDE="${COMFYUI_WORKFLOWS:-$(_env_file_read COMFYUI_WORKFLOWS "$file")}"
 }
 
-# One `docker inspect` yields network, address, workflow directory and
-# published port. Returns 1 with a reason in COMFY_DISCOVER_ERROR rather than
+# A few `docker inspect` calls yield network, address, workflow directory and
+# published port (four here, plus one in _comfy_preflight — each asks for a
+# single --format field, which is far easier to read than one combined
+# template). Returns 1 with a reason in COMFY_DISCOVER_ERROR rather than
 # exiting: a sandbox whose ComfyUI is down should still start.
 _comfy_discover() {
     COMFY_DISCOVER_ERROR=""
@@ -1256,7 +1258,10 @@ cmd_comfy() {
         args+=("$a")
     done
 
-    _comfy_run run --rm "${args[@]}" \
+    # No explicit --rm: _build_docker_args already emits one, and repeating it
+    # produced `docker run --rm --rm` (harmless to docker, but it reads as a
+    # bug in every dry-run trace). cmd_llm's run call has the same shape.
+    _comfy_run run "${args[@]}" \
         "sandbox-${name}:latest" \
         bash -lc 'comfy "$@"' _ "$@"
 }
