@@ -24,6 +24,16 @@ require_url() {
   is running, then restart the sandbox." "$EX_USAGE"
 }
 
+# A non-numeric timeout makes wait_for_job's `[ "$waited" -ge "$timeout" ]`
+# return 2 every iteration, so the poll loop never terminates. For a tool an
+# agent drives unattended, a hang is worse than any error. Called from every
+# site that accepts --timeout/COMFY_JOB_TIMEOUT before it reaches wait_for_job:
+# cmd_run, generate, cmd_job.
+require_numeric_timeout() {
+    [[ "$1" =~ ^[0-9]+$ ]] \
+        || die "--timeout must be a non-negative integer (got '$1')" "$EX_USAGE"
+}
+
 # api_get <path> -> body on stdout. Exits 2 on any transport or non-200 result.
 api_get() {
     local path="$1" body code
@@ -370,11 +380,7 @@ cmd_run() {
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
-    # A non-numeric timeout would make wait_for_job's "$waited" -ge "$timeout"
-    # comparison error out every iteration and poll forever — a hang is
-    # worse than any error for an agent-driven tool, so refuse it up front.
-    [[ "$timeout" =~ ^[0-9]+$ ]] \
-        || die "--timeout must be a non-negative integer (got '$timeout')" "$EX_USAGE"
+    require_numeric_timeout "$timeout"
     local wf
     wf=$(resolve_workflow "$ref") || exit $?
     run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
@@ -454,10 +460,7 @@ generate() {
             *)            die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
-    # Same guard as cmd_run: a non-numeric timeout would make wait_for_job's
-    # comparison error out every iteration and poll forever.
-    [[ "$timeout" =~ ^[0-9]+$ ]] \
-        || die "--timeout must be a non-negative integer (got '$timeout')" "$EX_USAGE"
+    require_numeric_timeout "$timeout"
     local wf
     wf=$(workflow_for_tag "$tag") || exit $?
     run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
@@ -481,6 +484,7 @@ cmd_job() {
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
+    require_numeric_timeout "$timeout"
     [ "$do_wait" = "1" ] && wait_for_job "$pid" "$timeout"
     local hist status
     hist=$(api_get "/history/$pid") || exit $?
@@ -518,6 +522,17 @@ cmd_upload() {
             *)      die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
+    # --name is agent-controlled input that lands in a curl -F field
+    # ("image=@${file};filename=${name}"): a ';', '=', '"' or newline in it
+    # would alter curl's own multipart-field parsing, not just the remote
+    # filename. This is not shell or JSON injection (Task 3's protections
+    # don't cover it), so it gets its own check here. Reducing to a
+    # basename first also keeps a path out of the field.
+    name=$(basename -- "$name")
+    case "$name" in
+        *';'*|*'='*|*'"'*|*$'\n'*)
+            die "--name must not contain ';', '=', '\"', or a newline (got '$name')" "$EX_USAGE" ;;
+    esac
     local body code
     body=$(curl -sS --connect-timeout 5 --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" \
         -w '\n%{http_code}' -X POST \

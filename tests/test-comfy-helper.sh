@@ -219,6 +219,10 @@ check_output "txt2img passes width through" "768" \
 check_output "txt2img passes steps through" "12" \
     jq -r '.prompt["3"].inputs.steps' "$TMP/last-prompt.json"
 check_status "txt2img succeeds" 0 "$COMFY" txt2img --prompt p --out "$TMP/t3"
+check_output "txt2img non-numeric timeout is refused" "must be a non-negative integer" \
+    "$COMFY" txt2img --prompt p --timeout abc --out "$TMP/tbad"
+check_status "txt2img non-numeric timeout exits 1, not a hang" 1 \
+    "$COMFY" txt2img --prompt p --timeout abc --out "$TMP/tbad"
 
 echo "-- video with no tagged workflow --"
 check_output "video explains the missing tag" "no workflow tagged 'video'" \
@@ -231,12 +235,27 @@ check_status "job succeeds"         0         "$COMFY" job stub-prompt-1
 "$COMFY" fetch stub-prompt-1 --out "$TMP/f1" >/dev/null 2>&1
 check_output "fetch writes outputs" "ComfyUI_00001_.png" ls "$TMP/f1"
 check_output "fetch sanitizes filenames too" "escape.png" ls "$TMP/f1"
+# job --wait shares wait_for_job's poll loop with `comfy run`: a non-numeric
+# --timeout must be refused up front, not poll forever. Bounded with `timeout
+# 10` so a regression fails this suite loudly instead of wedging it.
+check_output "job --wait non-numeric timeout is refused" "must be a non-negative integer" \
+    timeout 10 "$COMFY" job stub-prompt-1 --wait --timeout abc
+check_status "job --wait non-numeric timeout exits 1, not a hang" 1 \
+    timeout 10 "$COMFY" job stub-prompt-1 --wait --timeout abc
 
 echo "-- upload and cancel --"
 echo "fake" > "$TMP/in.png"
 check_output "upload reports the stored name" "uploaded.png" "$COMFY" upload "$TMP/in.png"
 check_status "upload succeeds"  0 "$COMFY" upload "$TMP/in.png"
 check_output "upload rejects a missing file" "no such file" "$COMFY" upload "$TMP/nope.png"
+# --name lands in a curl -F multipart field ("image=@file;filename=$name"):
+# a ';' or '=' in it would alter curl's own field parsing, not just the
+# remote filename. Not shell or JSON injection, but still agent-controlled
+# input that must be validated.
+check_output "upload rejects a hostile --name" "must not contain" \
+    "$COMFY" upload "$TMP/in.png" --name 'evil.png;filename=hack.sh'
+check_status "upload rejects a hostile --name exits 1" 1 \
+    "$COMFY" upload "$TMP/in.png" --name 'evil.png;filename=hack.sh'
 check_status "cancel succeeds" 0 "$COMFY" cancel
 
 echo ""
