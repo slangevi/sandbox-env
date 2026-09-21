@@ -36,6 +36,18 @@ check_not_output() {
     fi
 }
 
+check_status() {
+    local desc="$1" expected="$2"; shift 2
+    local status=0
+    "$@" >/dev/null 2>&1 || status=$?
+    if [ "$status" -eq "$expected" ]; then
+        echo "  PASS: $desc"; PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $desc (expected exit $expected, got $status)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 echo "=== Feature Asset Staging Tests ==="
 
 # A synthetic repo root: two features, one with assets and one without.
@@ -56,6 +68,36 @@ features:
 EOF
 
 run_build() { (cd "$PROJ" && SANDBOX_ROOT="$ROOT" SANDBOX_DRY_RUN=1 "$SANDBOX" build); }
+
+# A docker that must never be called: the dry-run path is supposed to
+# return before any Docker invocation, including the base-image check.
+# Without this, the test passes on any machine that has sandbox-base
+# built even if the ordering is wrong.
+SHIM="$TMP/shim"
+mkdir -p "$SHIM"
+cat > "$SHIM/docker" <<'SHIMEOF'
+#!/bin/bash
+echo "docker called: $*" >> "$DOCKER_CALLS"
+exit 1
+SHIMEOF
+chmod +x "$SHIM/docker"
+
+run_build_nodocker() {
+    (cd "$PROJ" && SANDBOX_ROOT="$ROOT" SANDBOX_DRY_RUN=1 \
+        DOCKER_CALLS="$TMP/docker-calls" PATH="$SHIM:$PATH" "$SANDBOX" build)
+}
+
+: > "$TMP/docker-calls"
+
+check_status "dry run exits 0" 0 run_build
+check_status "dry run succeeds with docker unavailable" 0 run_build_nodocker
+check_output "dry run still emits the Dockerfile" "COPY withassets.d/ /tmp/withassets.d/" run_build_nodocker
+if [ -s "$TMP/docker-calls" ]; then
+    echo "  FAIL: dry run invoked docker: $(cat "$TMP/docker-calls")"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS: dry run never invokes docker"; PASS=$((PASS + 1))
+fi
 
 check_output "asset dir is COPYed"        "COPY withassets.d/ /tmp/withassets.d/" run_build
 check_output "asset file is staged"       "withassets.d/tool"                     run_build
