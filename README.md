@@ -303,7 +303,10 @@ Drop a script in `features/`. It must:
 A feature may also ship a companion `features/<name>.d/` directory of extra
 files (`comfyui` does, for the `comfy` helper itself) — `sandbox build`
 copies it into the build context and removes it after the feature script
-runs, so those files never end up in the final image.
+runs, so those files are gone from the final image's *filesystem*. They are
+not gone from the image: the `COPY` creates a layer that the later `rm -rf`
+cannot erase, and anyone who can pull the image can read it back. Ship only
+what you would publish — never a credential or a private key.
 
 ## CLI Commands
 
@@ -636,6 +639,8 @@ comfy txt2img --prompt TEXT       generate an image
 comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
 comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
     [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
+    [--no-wait]                   submit only; print the prompt id and return
+                                  (collect it later with job/fetch)
 
 comfy job ID [--wait] [--json]    status of a queued job
 comfy fetch ID [--out DIR]        download a finished job's outputs
@@ -675,11 +680,32 @@ a sibling `<name>.params.json` manifest gets friendly parameter names
 (`--set 3.inputs.seed=42`). `comfy txt2img` and `comfy video` pick the
 workflow tagged `txt2img` or `video`.
 
+**Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
+id and returns immediately — nothing is polled and nothing is downloaded. Pick
+it up whenever it finishes:
+
+```bash
+id=$(comfy run my-video --set prompt="..." --no-wait)
+comfy job "$id"                   # queued / success / error
+comfy fetch "$id" --out ./renders # download the outputs
+```
+
+A render that outlives any `--timeout` you would sit through is exactly what
+this is for. Everything else about the run is unchanged: parameters, manifest
+defaults and `--json` all behave the same.
+
 **Security.** ComfyUI has no authentication, so anything that can reach it can
 reach its whole API — including ComfyUI-Manager's custom-node install
 endpoints, which execute code inside the ComfyUI container. That is why this
 is opt-in per project: a project without the `comfyui` feature never joins the
 network. The `comfy` helper is ergonomics, not a security boundary.
+
+For the same reason, `features: [comfyui]` and the sparkyard backend are
+refused together: `claude-spark`, `remote-spark`, `run --spark` and
+`llm --spark` all inject a LiteLLM gateway **admin** key, and a sandbox
+holding that key must not also have a route to an unauthenticated API that
+can execute code. `SPARKYARD_ALLOW_UNSAFE_FIREWALL=1` overrides it — the same
+switch that overrides the weakened-firewall refusal.
 
 ## LLM CLI
 
