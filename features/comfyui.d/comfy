@@ -196,12 +196,40 @@ $detail" "$EX_EXEC" ;;
     done
 }
 
+# fetch_view <dest> <filename> <subfolder> <type> — one attempt at /view.
+# Checks the HTTP status explicitly (like api_get/submit_graph do) rather
+# than trusting curl's exit code: without -f, curl calls a non-2xx response
+# with a body — an error page, say — a success, and would happily leave
+# that body sitting at $dest looking like a downloaded file.
+fetch_view() {
+    local code
+    code=$(curl -sS -G --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" -o "$1" \
+        -w '%{http_code}' \
+        --data-urlencode "filename=$2" \
+        --data-urlencode "subfolder=$3" \
+        --data-urlencode "type=$4" \
+        "${COMFYUI_URL}/view") || return 1
+    [ "$code" = "200" ]
+}
+
 # Writes every output of a finished job into <outdir>, printing each path.
 download_outputs() {
-    local pid="$1" out="$2" hist fn sub typ safe dest n
+    local pid="$1" out="$2" hist row fn sub typ safe dest n
     mkdir -p "$out" || die "cannot create output directory $out" "$EX_USAGE"
     hist=$(api_get "/history/$pid") || exit $?
-    while IFS=$'\t' read -r fn sub typ; do
+    # One compact JSON object per line, read whole (IFS= disables all
+    # splitting) and picked apart with jq afterward — NOT @tsv read via
+    # `IFS=$'\t' read -r a b c`: bash's `read` treats tab as IFS
+    # *whitespace*, so runs of it collapse and an empty middle field (the
+    # overwhelmingly common case: subfolder is "" for a top-level output)
+    # is silently dropped, shifting every later field left. That bug used to
+    # live here and made every default-subfolder download fetch the wrong
+    # (filename, type) pair, which ComfyUI's /view then 400s on.
+    while IFS= read -r row; do
+        [ -z "$row" ] && continue
+        fn=$(jq -r '.filename' <<<"$row")
+        sub=$(jq -r '.subfolder' <<<"$row")
+        typ=$(jq -r '.type' <<<"$row")
         [ -z "$fn" ] && continue
         # Filenames come from ComfyUI — i.e. off the network. Reduce to a
         # basename BEFORE the value is ever used as a local path.
@@ -213,18 +241,15 @@ download_outputs() {
             dest="$out/${safe%.*}-${n}.${safe##*.}"
             n=$((n + 1))
         done
-        curl -sS -G --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" -o "$dest" \
-            --data-urlencode "filename=$fn" \
-            --data-urlencode "subfolder=$sub" \
-            --data-urlencode "type=$typ" \
-            "${COMFYUI_URL}/view" \
+        fetch_view "$dest" "$fn" "$sub" "$typ" \
             || die "failed downloading $safe from $COMFYUI_URL" "$EX_UNREACHABLE"
+        [ -s "$dest" ] || die "downloaded $safe from $COMFYUI_URL but it is empty" "$EX_UNREACHABLE"
         printf '%s\n' "$dest"
-    done < <(jq -r --arg id "$pid" '
+    done < <(jq -c --arg id "$pid" '
         .[$id].outputs // {} | to_entries[] | .value | to_entries[] | .value
         | if type == "array" then .[] else empty end
         | select(type == "object" and has("filename"))
-        | [.filename, (.subfolder // ""), (.type // "output")] | @tsv' <<<"$hist")
+        | {filename: .filename, subfolder: (.subfolder // ""), type: (.type // "output")}' <<<"$hist")
 }
 
 # ── run ──────────────────────────────────────────────────────────────

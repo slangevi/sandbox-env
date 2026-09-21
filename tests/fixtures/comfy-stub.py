@@ -76,7 +76,21 @@ class Handler(BaseHTTPRequestHandler):
                 ]}},
             }})
         if p == "/view":
-            data = b"\x89PNG\r\n\x1a\n" + q.get("filename", [""])[0].encode()
+            fn = q.get("filename", [""])[0]
+            sub = q.get("subfolder", [""])[0]
+            typ = q.get("type", [""])[0]
+            # Every filename /history hands back above has subfolder="" and
+            # type="output". Real ComfyUI 400s on a filename/subfolder/type
+            # combo that doesn't match what it actually saved — reject a
+            # mismatch here too, so a caller that mis-threads these three
+            # values (e.g. by reading a tab-separated `filename subfolder
+            # type` line with `IFS=$'\t' read`, where bash's whitespace-IFS
+            # collapsing silently drops an empty middle field and shifts
+            # subfolder/type off by one) fails loudly instead of the stub
+            # papering over it by echoing back bytes regardless of params.
+            if sub != "" or typ != "output":
+                return self._send(400, {"error": f"no such file: {fn!r} in subfolder={sub!r} type={typ!r}"})
+            data = b"\x89PNG\r\n\x1a\n" + fn.encode()
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(data)))
