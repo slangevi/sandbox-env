@@ -413,24 +413,178 @@ cmd_models() {
     done <<<"$folders"
 }
 
+# ── generators ───────────────────────────────────────────────────────
+
+cmd_workflows() {
+    local name wf mf
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        wf="$COMFY_WORKFLOWS/$name.json"
+        mf=$(manifest_path "$wf")
+        if [ -f "$mf" ]; then
+            printf '%s — %s\n' "$name" "$(jq -r '.description // "no description"' "$mf")"
+            printf '  tags:   %s\n' "$(jq -r '(.tags // []) | join(", ")' "$mf")"
+            printf '  params: %s\n' "$(jq -r '.params | keys | join(", ")' "$mf")"
+        else
+            printf '%s — no manifest; use raw node paths with --set\n' "$name"
+        fi
+    done < <(list_workflow_names)
+}
+
+# Shared by txt2img and video: both are run_workflow against a tagged
+# workflow with flags mapped onto manifest parameter names.
+generate() {
+    local tag="$1"; shift
+    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
+    local sets=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prompt)     sets+=("prompt=$2"); shift 2 ;;
+            --negative)   sets+=("negative=$2"); shift 2 ;;
+            --checkpoint) sets+=("checkpoint=$2"); shift 2 ;;
+            --seed)       sets+=("seed=$2"); shift 2 ;;
+            --steps)      sets+=("steps=$2"); shift 2 ;;
+            --width)      sets+=("width=$2"); shift 2 ;;
+            --height)     sets+=("height=$2"); shift 2 ;;
+            --frames)     sets+=("frames=$2"); shift 2 ;;
+            --set)        sets+=("$2"); shift 2 ;;
+            --out)        out="$2"; shift 2 ;;
+            --timeout)    timeout="$2"; shift 2 ;;
+            --json)       want_json=1; shift ;;
+            *)            die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    # Same guard as cmd_run: a non-numeric timeout would make wait_for_job's
+    # comparison error out every iteration and poll forever.
+    [[ "$timeout" =~ ^[0-9]+$ ]] \
+        || die "--timeout must be a non-negative integer (got '$timeout')" "$EX_USAGE"
+    local wf
+    wf=$(workflow_for_tag "$tag") || exit $?
+    run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
+}
+
+cmd_txt2img() { require_url; generate txt2img "$@"; }
+cmd_video()   { require_url; generate video "$@"; }
+
+# ── job control ──────────────────────────────────────────────────────
+
+cmd_job() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy job <prompt_id> [--wait] [--json]" "$EX_USAGE"
+    local pid="$1"; shift
+    local do_wait=0 want_json=0 timeout="${COMFY_JOB_TIMEOUT:-600}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wait)    do_wait=1; shift ;;
+            --json)    want_json=1; shift ;;
+            --timeout) timeout="$2"; shift 2 ;;
+            *)         die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    [ "$do_wait" = "1" ] && wait_for_job "$pid" "$timeout"
+    local hist status
+    hist=$(api_get "/history/$pid") || exit $?
+    status=$(jq -r --arg id "$pid" '.[$id].status.status_str // "pending"' <<<"$hist")
+    if [ "$want_json" = "1" ]; then
+        jq -n --arg id "$pid" --arg s "$status" '{prompt_id: $id, status: $s}'
+    else
+        printf '%s %s\n' "$pid" "$status"
+    fi
+}
+
+cmd_fetch() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy fetch <prompt_id> [--out DIR]" "$EX_USAGE"
+    local pid="$1"; shift
+    local out="./comfy-out"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out) out="$2"; shift 2 ;;
+            *)     die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    download_outputs "$pid" "$out"
+}
+
+cmd_upload() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy upload <file> [--name NAME]" "$EX_USAGE"
+    local file="$1"; shift
+    [ -f "$file" ] || die "no such file: $file" "$EX_USAGE"
+    local name; name=$(basename -- "$file")
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            *)      die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    local body code
+    body=$(curl -sS --connect-timeout 5 --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" \
+        -w '\n%{http_code}' -X POST \
+        -F "image=@${file};filename=${name}" -F "overwrite=true" \
+        "${COMFYUI_URL}/upload/image" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    [ "$code" = "200" ] || die "upload failed (HTTP $code): $body" "$EX_EXEC"
+    jq -r '"\(.name) (\(.type)\(if .subfolder == "" then "" else "/" + .subfolder end))"' <<<"$body"
+}
+
+cmd_cancel() {
+    require_url
+    local body code
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
+        -X POST "${COMFYUI_URL}/interrupt" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    [ "$code" = "200" ] || die "interrupt failed (HTTP $code)" "$EX_EXEC"
+    if [ $# -gt 0 ]; then
+        curl -sS --max-time "$HTTP_TIMEOUT" -X POST -H 'Content-Type: application/json' \
+            --data-binary @- "${COMFYUI_URL}/queue" \
+            <<<"$(jq -n --arg id "$1" '{delete: [$id]}')" >/dev/null 2>&1 || true
+    fi
+    echo "interrupted"
+}
+
 usage() {
     cat <<'USAGE'
 comfy — generate images and video through a ComfyUI instance
 
-  comfy status                 ComfyUI version, device, free VRAM, queue depth
-  comfy models [FOLDER]        installed models, by folder
-  comfy run WF [--set k=v]...  run a workflow; --out DIR, --timeout S, --json
+  comfy status                      version, device, free VRAM, queue depth
+  comfy models [FOLDER]             installed models, by folder
+  comfy workflows                   available workflows and their parameters
+
+  comfy txt2img --prompt TEXT       generate an image
+      [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
+      [--width N] [--height N] [--out DIR] [--json]
+  comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+  comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
+      [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
+
+  comfy job ID [--wait] [--json]    status of a queued job
+  comfy fetch ID [--out DIR]        download a finished job's outputs
+  comfy upload FILE [--name NAME]   upload an input image
+  comfy cancel [ID]                 interrupt the running job
+
+Exit codes: 0 ok, 1 usage, 2 ComfyUI unreachable, 3 execution error, 4 timeout.
 
 Environment:
   COMFYUI_URL        base URL of the ComfyUI API (set by the sandbox CLI)
-  COMFY_WORKFLOWS    directory of shared workflows (default /opt/comfy-workflows)
+  COMFY_WORKFLOWS    shared workflow directory (default /opt/comfy-workflows)
 USAGE
 }
 
 case "${1:-help}" in
     status)         shift; cmd_status "$@" ;;
     models)         shift; cmd_models "$@" ;;
+    workflows)      shift; cmd_workflows "$@" ;;
     run)            shift; cmd_run "$@" ;;
+    txt2img)        shift; cmd_txt2img "$@" ;;
+    video)          shift; cmd_video "$@" ;;
+    job)            shift; cmd_job "$@" ;;
+    fetch)          shift; cmd_fetch "$@" ;;
+    upload)         shift; cmd_upload "$@" ;;
+    cancel)         shift; cmd_cancel "$@" ;;
     help|-h|--help) usage ;;
     *)              printf 'comfy: unknown command: %s\n\n' "$1" >&2; usage >&2; exit "$EX_USAGE" ;;
 esac

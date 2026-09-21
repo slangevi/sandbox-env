@@ -193,6 +193,52 @@ check_status "hostile prompt's command substitution never executed in cwd" 1 \
     test -e "./injected-X"
 rm -f "$SCRIPT_DIR/injected-X" "./injected-X" 2>/dev/null
 
+kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null
+python3 "$SCRIPT_DIR/tests/fixtures/comfy-stub.py" "$PORT" "$TMP" &
+STUB_PID=$!
+for _ in $(seq 1 50); do
+    curl -sf "$COMFYUI_URL/system_stats" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+echo "-- workflows listing --"
+check_output "workflows lists the fixture"   "minimal-txt2img" "$COMFY" workflows
+check_output "workflows shows description"   "Minimal SD1.5"   "$COMFY" workflows
+check_output "workflows shows params"        "prompt"          "$COMFY" workflows
+check_not_output "workflows hides manifest files" "params.json" "$COMFY" workflows
+
+echo "-- txt2img --"
+"$COMFY" txt2img --prompt "a green pear" --out "$TMP/t1" >/dev/null 2>&1
+check_output "txt2img sets the prompt node" "a green pear" \
+    jq -r '.prompt["6"].inputs.text' "$TMP/last-prompt.json"
+check_output "txt2img seed is a number" "number" \
+    jq -r '.prompt["3"].inputs.seed | type' "$TMP/last-prompt.json"
+"$COMFY" txt2img --prompt p --width 768 --steps 12 --out "$TMP/t2" >/dev/null 2>&1
+check_output "txt2img passes width through" "768" \
+    jq -r '.prompt["5"].inputs.width' "$TMP/last-prompt.json"
+check_output "txt2img passes steps through" "12" \
+    jq -r '.prompt["3"].inputs.steps' "$TMP/last-prompt.json"
+check_status "txt2img succeeds" 0 "$COMFY" txt2img --prompt p --out "$TMP/t3"
+
+echo "-- video with no tagged workflow --"
+check_output "video explains the missing tag" "no workflow tagged 'video'" \
+    "$COMFY" video --prompt p --out "$TMP/v1"
+check_status "video exits 1 when untagged" 1 "$COMFY" video --prompt p --out "$TMP/v1"
+
+echo "-- job and fetch --"
+check_output "job reports status"   "success" "$COMFY" job stub-prompt-1
+check_status "job succeeds"         0         "$COMFY" job stub-prompt-1
+"$COMFY" fetch stub-prompt-1 --out "$TMP/f1" >/dev/null 2>&1
+check_output "fetch writes outputs" "ComfyUI_00001_.png" ls "$TMP/f1"
+check_output "fetch sanitizes filenames too" "escape.png" ls "$TMP/f1"
+
+echo "-- upload and cancel --"
+echo "fake" > "$TMP/in.png"
+check_output "upload reports the stored name" "uploaded.png" "$COMFY" upload "$TMP/in.png"
+check_status "upload succeeds"  0 "$COMFY" upload "$TMP/in.png"
+check_output "upload rejects a missing file" "no such file" "$COMFY" upload "$TMP/nope.png"
+check_status "cancel succeeds" 0 "$COMFY" cancel
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
