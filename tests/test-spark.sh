@@ -242,7 +242,7 @@ PY
 PORT=18400
 python3 "$TMP/stub.py" "$PORT" &
 STUB_PID=$!
-trap 'kill "$STUB_PID" 2>/dev/null || true; docker rm -f sandbox-spark-argtest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-argtest:latest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-envtest:latest >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
+trap 'kill "$STUB_PID" 2>/dev/null || true; docker rm -f sandbox-spark-argtest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-argtest:latest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-envtest:latest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-comfy-argtest:latest >/dev/null 2>&1 || true; docker image rm -f sandbox-spark-strict-argtest:latest >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
 
 for _ in $(seq 1 50); do
     curl -sf "http://127.0.0.1:$PORT/health/liveliness" >/dev/null 2>&1 && break
@@ -346,6 +346,69 @@ check_not_output "claude-spark's firewall refusal does not still print docker ar
 
 check_output "claude-spark mentions the override env var" \
     "SPARKYARD_ALLOW_UNSAFE_FIREWALL=1" run_no_override claude-spark qwen3-coder-next
+
+# ── Firewall guard: features: [comfyui] (I3) ─────────────────────────
+# firewall: strict with no allowed_domains — this project passes every other
+# arm of the guard. The comfyui feature joins the sandbox to the ComfyUI
+# container's network and punches that container's address through strict
+# mode, and ComfyUI's API is unauthenticated (ComfyUI-Manager can install and
+# execute code there, in a container with unrestricted egress of its own).
+# Refused on the same terms as a weakened firewall, with the same override.
+PROJ_CFY="$TMP/proj-comfy"
+mkdir -p "$PROJ_CFY"
+cat > "$PROJ_CFY/sandbox.yaml" <<'EOF'
+name: spark-comfy-argtest
+firewall: strict
+features:
+  - comfyui
+EOF
+docker image tag sandbox-base:latest sandbox-spark-comfy-argtest:latest >/dev/null 2>&1
+
+run_comfy_no_override() {
+    (cd "$PROJ_CFY" && env XDG_CONFIG_HOME="$EMPTY_HOME" LITELLM_MASTER_KEY="sk-dry-secret" \
+        SPARKYARD_URL="http://127.0.0.1:$PORT" SANDBOX_DRY_RUN=1 "$SANDBOX" "$@")
+}
+run_comfy_override() {
+    (cd "$PROJ_CFY" && env XDG_CONFIG_HOME="$EMPTY_HOME" LITELLM_MASTER_KEY="sk-dry-secret" \
+        SPARKYARD_URL="http://127.0.0.1:$PORT" SANDBOX_DRY_RUN=1 \
+        SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 "$SANDBOX" "$@")
+}
+
+check_output "claude-spark refuses features: [comfyui] even under firewall: strict (I3)" \
+    "unauthenticated ComfyUI API that can execute code" \
+    run_comfy_no_override claude-spark qwen3-coder-next
+check_status "...and exits non-zero" 1 \
+    run_comfy_no_override claude-spark qwen3-coder-next
+check_not_output "...and never prints the gateway args" \
+    "ANTHROPIC_BASE_URL" run_comfy_no_override claude-spark qwen3-coder-next
+check_output "...and names the same override" \
+    "SPARKYARD_ALLOW_UNSAFE_FIREWALL=1" run_comfy_no_override claude-spark qwen3-coder-next
+check_output "the same override lets the comfyui project proceed (I3)" \
+    "ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT" \
+    run_comfy_override claude-spark qwen3-coder-next
+check_output "llm --spark is guarded on the comfyui feature too (I3)" \
+    "unauthenticated ComfyUI API that can execute code" \
+    run_comfy_no_override llm --spark qwen3-coder-next "hi"
+
+# Control: the guard must not fire on a strict project WITHOUT the feature —
+# otherwise every assertion above would pass with the condition stuck true.
+PROJ_STRICT="$TMP/proj-strict"
+mkdir -p "$PROJ_STRICT"
+cat > "$PROJ_STRICT/sandbox.yaml" <<'EOF'
+name: spark-strict-argtest
+firewall: strict
+features: []
+EOF
+docker image tag sandbox-base:latest sandbox-spark-strict-argtest:latest >/dev/null 2>&1
+run_strict_no_override() {
+    (cd "$PROJ_STRICT" && env XDG_CONFIG_HOME="$EMPTY_HOME" LITELLM_MASTER_KEY="sk-dry-secret" \
+        SPARKYARD_URL="http://127.0.0.1:$PORT" SANDBOX_DRY_RUN=1 "$SANDBOX" "$@")
+}
+check_not_output "a strict project without the feature is NOT refused (I3 control)" \
+    "refusing to inject it" run_strict_no_override claude-spark qwen3-coder-next
+check_output "...and that project reaches the gateway args with no override at all" \
+    "ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT" \
+    run_strict_no_override claude-spark qwen3-coder-next
 
 # From here on, every dry-run test in this file needs the escape hatch: the
 # fixture project uses firewall: open, and F1 makes that a hard refusal

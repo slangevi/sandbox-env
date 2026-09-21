@@ -966,6 +966,16 @@ _spark_preflight() {
 # egress is refused by default. SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 is an
 # explicit escape hatch for a project the caller trusts.
 #
+# features: [comfyui] is refused on the same terms, and deliberately so: it
+# joins the sandbox to the ComfyUI container's network and punches that
+# container's address through strict mode, and ComfyUI's API is
+# unauthenticated — its ComfyUI-Manager endpoints install and execute code in
+# a container that has unrestricted internet egress of its own. That is a
+# materially equivalent risk to an attacker-chosen allowed_domains entry, so
+# it gets the same treatment rather than a bare warning: a project with
+# firewall: strict and no allowed_domains otherwise sails straight through
+# this guard and receives the ADMIN key.
+#
 # Called from every spark entry point that will actually launch a container
 # carrying the key: cmd_claude_spark (covers both its attach and fresh
 # branches — this is called before that branch decision), cmd_remote_spark,
@@ -973,7 +983,7 @@ _spark_preflight() {
 # ships the key into a container, so it doesn't call this.
 _spark_guard_firewall() {
     [ -n "${CONFIG_FILE:-}" ] || return 0
-    local fw allowed
+    local fw allowed feature has_comfyui=false refuse=0
     fw=$(config_get_default '.firewall' 'strict')
     # Do not pipe config_get's output into `head`: once allowed_domains is
     # long enough to exceed the pipe buffer, `head` exits after its first
@@ -984,8 +994,23 @@ _spark_guard_firewall() {
     # first line in bash.
     allowed=$(config_get '.allowed_domains[]')
     allowed=${allowed%%$'\n'*}
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+
     if [ "$fw" != "strict" ] || [ -n "$allowed" ]; then
         error "This project's sandbox.yaml weakens egress control ($([ "$fw" != strict ] && echo "firewall: $fw" || echo "allowed_domains set"))."
+        refuse=1
+    fi
+    # Reported separately, and both are reported when both apply: an operator
+    # who fixes only the one named in the first line would otherwise be sent
+    # round the loop again.
+    if $has_comfyui; then
+        error "This project's sandbox.yaml has features: [comfyui], which gives the sandbox a route to an unauthenticated ComfyUI API that can execute code."
+        refuse=1
+    fi
+
+    if [ "$refuse" = "1" ]; then
         error "The sparkyard master key is a gateway ADMIN credential; refusing to inject it."
         error "Override with SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 if this project is trusted."
         [ "${SPARKYARD_ALLOW_UNSAFE_FIREWALL:-0}" = "1" ] || exit 1
