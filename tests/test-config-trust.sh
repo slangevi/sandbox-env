@@ -39,6 +39,7 @@ trap 'chmod 755 "$TMP/mnt-eaccess/blocked" 2>/dev/null || true; \
     sandbox-mnt-sockdir2:latest sandbox-mnt-decoy:latest \
     sandbox-mnt-colima:latest sandbox-mnt-orbstack:latest \
     sandbox-mnt-ro-cap:latest sandbox-env-bool:latest sandbox-env-dash:latest \
+    sandbox-env-comfyip:latest \
     sandbox-mnt-nohost:latest sandbox-mnt-namedvol:latest sandbox-mnt-multimiss:latest \
     sandbox-mnt-nocontainer:latest sandbox-mnt-stalecheck:latest \
     sandbox-cfgtrust-write:latest sandbox-cfgtrust-delete:latest sandbox-cfgtrust-read:latest \
@@ -145,6 +146,32 @@ check_not_output "ordinary env names are not rejected" "Invalid env var name" \
 
 check_output "the ordinary-env project actually reaches execution" "Running sandbox-" \
     run_cfg "$P_OK" run -- true
+
+# C1: SANDBOX_COMFYUI_IP steers init-firewall.sh exactly as SANDBOX_FIREWALL
+# and SANDBOX_ALLOWED_DOMAINS do — collect_domains reads it unconditionally
+# (the `comfyui` feature is NOT a precondition) and feeds it into the
+# allowed-domains ipset as an IP literal or CIDR. The dotted-quad guard in
+# _build_docker_args only vets the value the CLI discovers from `docker
+# inspect`, so a value arriving through `env:` bypasses it entirely. Left
+# unreserved, this config opened 1.0.0.0/8 while still reading as
+# `firewall: strict` with no `allowed_domains` — which also slips past
+# _spark_guard_firewall and gets the gateway ADMIN key injected alongside it.
+P_FWENV="$TMP/env-comfyip"
+mkdir -p "$P_FWENV"
+cat > "$P_FWENV/sandbox.yaml" <<'YAML'
+name: env-comfyip
+features: []
+firewall: open
+env:
+  SANDBOX_COMFYUI_IP: 1.0.0.0/8
+YAML
+docker image tag sandbox-base:latest sandbox-env-comfyip:latest >/dev/null 2>&1
+check_output "SANDBOX_COMFYUI_IP from env: is refused (C1)" \
+    "Skipping dangerous env var 'SANDBOX_COMFYUI_IP'" \
+    run_cfg "$P_FWENV" run -- true
+check_not_output "...and the CIDR never reaches the container (C1)" \
+    "SANDBOX_COMFYUI_IP=1.0.0.0/8" \
+    run_cfg_trace "$P_FWENV" run -- true
 
 # ── claude.args ──────────────────────────────────────────────────────
 echo "-- claude.args --"
