@@ -306,11 +306,24 @@ check_status "upload rejects a hostile --name exits 1" 1 \
     "$COMFY" upload "$TMP/in.png" --name 'evil.png;filename=hack.sh'
 # The file path lands in the same field, so it gets the same guard — otherwise
 # the --name check above reads as stronger protection than it actually is.
-cp "$TMP/in.png" "$TMP/in;filename=hack.sh.png"
-check_output "upload rejects a hostile file path too" "must not contain" \
-    "$COMFY" upload "$TMP/in;filename=hack.sh.png"
-check_status "upload rejects a hostile file path exits 1" 1 \
-    "$COMFY" upload "$TMP/in;filename=hack.sh.png"
+#
+# The hostile character MUST sit in a directory component, never the basename:
+# `name` defaults to `basename -- "$file"`, so a basename like
+# "in;filename=hack.sh.png" trips the --name guard above and produces the same
+# "must not contain" message and exit 1 whether or not the $file guard exists
+# at all. (That was the first version of these two checks, and deleting the
+# whole `case "$file"` block left them both green.) A clean basename under a
+# hostile directory can only be caught by the $file guard — and the expected
+# text is the $file guard's own wording, not the shared prefix.
+mkdir -p "$TMP/ev;il" "$TMP/ev=il"
+cp "$TMP/in.png" "$TMP/ev;il/clean.png"
+cp "$TMP/in.png" "$TMP/ev=il/clean.png"
+check_output "upload rejects a ';' in a directory component of the path" \
+    "the file path must not contain" "$COMFY" upload "$TMP/ev;il/clean.png"
+check_status "...and exits 1" 1 "$COMFY" upload "$TMP/ev;il/clean.png"
+check_output "upload rejects an '=' in a directory component of the path" \
+    "the file path must not contain" "$COMFY" upload "$TMP/ev=il/clean.png"
+check_status "...and exits 1 too" 1 "$COMFY" upload "$TMP/ev=il/clean.png"
 check_status "cancel succeeds" 0 "$COMFY" cancel
 
 echo ""
