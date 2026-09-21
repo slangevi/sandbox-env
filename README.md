@@ -300,6 +300,11 @@ Drop a script in `features/`. It must:
 3. Clean up after itself (`rm -rf /var/lib/apt/lists/*`)
 4. Optionally write firewall domains to `/etc/sandbox/firewall.d/<name>.conf`
 
+A feature may also ship a companion `features/<name>.d/` directory of extra
+files (`comfyui` does, for the `comfy` helper itself) — `sandbox build`
+copies it into the build context and removes it after the feature script
+runs, so those files never end up in the final image.
+
 ## CLI Commands
 
 ```
@@ -643,8 +648,8 @@ error, `4` timeout, and `130` if you interrupt it with Ctrl-C (the job may
 still be running on the GPU — the interrupt message tells you the `comfy
 fetch` command to retrieve it later).
 
-**How it finds ComfyUI.** One `docker inspect comfyui` at launch yields the
-container's Docker network, its address, and — from the compose
+**How it finds ComfyUI.** A few `docker inspect comfyui` calls at launch
+yield the container's Docker network, its address, and — from the compose
 `working_dir` label — the repo whose `workflows/` directory is mounted at
 `/opt/comfy-workflows` read-only. The sandbox joins that network and reaches
 ComfyUI at `http://comfyui:8188`. Override any part in
@@ -658,7 +663,10 @@ COMFYUI_WORKFLOWS=/path/to/workflows
 ```
 
 If ComfyUI is not running, the sandbox starts anyway and `comfy` says it is
-not wired in.
+not wired in. With `firewall: strict`, the container's discovered address is
+also added to the strict firewall's allowlist (as a bare IPv4 literal only —
+anything else is warned about and omitted), so the sandbox can actually
+reach it; nothing further to configure for that.
 
 **Workflows and manifests.** `comfy run <workflow>` executes any API-format
 workflow from the shared directory or a path in the workspace. A workflow with

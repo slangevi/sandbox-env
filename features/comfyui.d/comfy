@@ -241,14 +241,23 @@ download_outputs() {
             dest="$out/${safe%.*}-${n}.${safe##*.}"
             n=$((n + 1))
         done
-        fetch_view "$dest" "$fn" "$sub" "$typ" \
-            || die "failed downloading $safe from $COMFYUI_URL" "$EX_UNREACHABLE"
-        [ -s "$dest" ] || die "downloaded $safe from $COMFYUI_URL but it is empty" "$EX_UNREACHABLE"
+        fetch_view "$dest" "$fn" "$sub" "$typ" || {
+            rm -f "$dest"
+            die "failed downloading $safe from $COMFYUI_URL" "$EX_UNREACHABLE"
+        }
+        if [ ! -s "$dest" ]; then
+            rm -f "$dest"
+            die "downloaded $safe from $COMFYUI_URL but it is empty" "$EX_UNREACHABLE"
+        fi
         printf '%s\n' "$dest"
     done < <(jq -c --arg id "$pid" '
         .[$id].outputs // {} | to_entries[] | .value | to_entries[] | .value
         | if type == "array" then .[] else empty end
-        | select(type == "object" and has("filename"))
+        # .filename must actually be a string — a null (or missing, which
+        # also types as null) used to render as an empty @tsv field and get
+        # skipped by the caller; skip it here explicitly instead of handing
+        # the literal string "null" to fetch_view as a filename.
+        | select(type == "object" and (.filename | type == "string"))
         | {filename: .filename, subfolder: (.subfolder // ""), type: (.type // "output")}' <<<"$hist")
 }
 
@@ -606,7 +615,8 @@ comfy — generate images and video through a ComfyUI instance
   comfy upload FILE [--name NAME]   upload an input image
   comfy cancel [ID]                 interrupt the running job
 
-Exit codes: 0 ok, 1 usage, 2 ComfyUI unreachable, 3 execution error, 4 timeout.
+Exit codes: 0 ok, 1 usage, 2 ComfyUI unreachable, 3 execution error, 4 timeout,
+130 interrupted (Ctrl-C) — the job may still be running; see "comfy fetch".
 
 Environment:
   COMFYUI_URL        base URL of the ComfyUI API (set by the sandbox CLI)

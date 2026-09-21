@@ -56,8 +56,8 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
   - `_load_comfy_env` / `_comfy_discover` / `_comfy_preflight` / `_comfy_run` —
     ComfyUI backend, used by `cmd_comfy_status`, `cmd_comfy`, and the
     `features: [comfyui]` branch of `_build_docker_args`. `_comfy_discover`
-    derives network, address, workflow directory and published port from one
-    `docker inspect`, and returns 1 with a reason in `COMFY_DISCOVER_ERROR`
+    derives network, address, workflow directory and published port from a
+    few `docker inspect` calls, and returns 1 with a reason in `COMFY_DISCOVER_ERROR`
     rather than exiting — a sandbox whose ComfyUI is down still starts.
     `_env_file_read` (formerly `_spark_config_read`) is shared with the
     sparkyard backend.
@@ -66,13 +66,18 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 
 - **Security layers in the CLI**: env var blocklist (blocks PATH, NODE_OPTIONS,
   ANTHROPIC_*, proxy vars, etc.), git config key whitelist (only 10 safe keys),
-  and a config-trust section holding three validators — `validate_env_key`
+  and a config-trust section holding four validators — `validate_env_key`
   (env names must be identifier-shaped — letters/digits/`_`, plus `.`/`-`
   after the first character — so a YAML key cannot be evaluated as a yq
   expression; the lookup also uses `strenv`), `validate_claude_arg` (refuses
   privilege- and credential-affecting flags as a hard error, warns on unknown
-  ones), and `validate_mount` (always refuses the Docker socket; refuses
-  credential and system paths unless `SANDBOX_ALLOW_UNSAFE_MOUNTS=1`).
+  ones), `validate_mount` (always refuses the Docker socket; refuses
+  credential and system paths unless `SANDBOX_ALLOW_UNSAFE_MOUNTS=1`), and the
+  inline `COMFY_IP` check in `_build_docker_args` (rejects a newline/CR, then
+  requires a bare dotted-quad IPv4, warn-and-omit otherwise) before that
+  address becomes `SANDBOX_COMFYUI_IP` and lands in the strict firewall's
+  ipset — a value landing in a firewall allowlist gets no less scrutiny than
+  one landing in an env var or a mount.
   They are called from `_build_docker_args` and `_read_claude_config`. Every
   container-launching command already calls `_build_docker_args`; every
   command that passes args to `claude` already calls `_read_claude_config` —
