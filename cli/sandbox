@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Resolve the sandbox-env repo root (where this script lives)
-SANDBOX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Overridable so tests can point the CLI at a synthetic repo root holding
+# fixture features and templates. Not a security boundary: anyone who can set
+# this already controls the image build end to end.
+SANDBOX_ROOT="${SANDBOX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 # Colors
 RED='\033[0;31m'
@@ -1057,14 +1059,6 @@ cmd_build() {
     fi
     validate_name "$name"
 
-    # Check base image exists
-    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
-        error "Base image not found. Run 'sandbox build-base' first."
-        exit 1
-    fi
-
-    log "Building project image: sandbox-${name}:latest"
-
     # Generate Dockerfile from template
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -1085,8 +1079,17 @@ cmd_build() {
             exit 1
         fi
         cp "$script" "$tmpdir/${feature}.sh"
+        # A feature may ship a companion directory of assets (scripts it
+        # installs, config it copies). validate_feature has already bounded
+        # $feature to ^[a-z0-9][a-z0-9-]*$, so neither path can escape.
+        local assets="$SANDBOX_ROOT/features/${feature}.d"
+        if [ -d "$assets" ]; then
+            cp -R "$assets" "$tmpdir/${feature}.d"
+            features_block="${features_block}COPY ${feature}.d/ /tmp/${feature}.d/
+"
+        fi
         features_block="${features_block}COPY ${feature}.sh /tmp/${feature}.sh
-RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm /tmp/${feature}.sh
+RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm -rf /tmp/${feature}.sh /tmp/${feature}.d
 "
     done < <(config_get '.features[]')
 
@@ -1124,6 +1127,24 @@ RUN chmod +x /tmp/custom-setup.sh && /tmp/custom-setup.sh && rm /tmp/custom-setu
             *)              printf '%s\n' "$line" ;;
         esac
     done < "$SANDBOX_ROOT/templates/Dockerfile.project.tmpl" > "$dockerfile"
+
+    # Print what would be built instead of building it. Used by
+    # tests/test-build-assets.sh to assert staging without Docker.
+    if [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+        echo "--- Dockerfile ---"
+        cat "$dockerfile"
+        echo "--- staged files ---"
+        (cd "$tmpdir" && find . -type f | sed 's|^\./||' | sort)
+        return 0
+    fi
+
+    # Check base image exists
+    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
+        error "Base image not found. Run 'sandbox build-base' first."
+        exit 1
+    fi
+
+    log "Building project image: sandbox-${name}:latest"
 
     # Build
     docker build $no_cache \
