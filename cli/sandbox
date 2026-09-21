@@ -807,9 +807,9 @@ spark_config_path() {
     echo "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env"
 }
 
-# Read one KEY=VALUE from the sparkyard env file WITHOUT sourcing it.
+# Read one KEY=VALUE from an env-style config file WITHOUT sourcing it.
 # Sourcing would execute arbitrary code as the user from a config file.
-_spark_config_read() {
+_env_file_read() {
     local key="$1" file="$2" line val
     [ -f "$file" ] || return 0
     line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -n 1) || true
@@ -846,7 +846,7 @@ _load_spark_env() {
         fi
     fi
 
-    SPARK_URL="${SPARKYARD_URL:-$(_spark_config_read SPARKYARD_URL "$file")}"
+    SPARK_URL="${SPARKYARD_URL:-$(_env_file_read SPARKYARD_URL "$file")}"
     SPARK_URL="${SPARK_URL:-$SPARK_DEFAULT_URL}"
     SPARK_URL="${SPARK_URL%/}"
     # Users copy the base URL straight out of LiteLLM's docs, which include
@@ -857,8 +857,8 @@ _load_spark_env() {
         error "A value like a curl option (e.g. -K/path/to/file) is not a URL."
         exit 1
     fi
-    SPARK_KEY="${LITELLM_MASTER_KEY:-$(_spark_config_read LITELLM_MASTER_KEY "$file")}"
-    SPARK_DEFAULT_MODEL="${SPARKYARD_MODEL:-$(_spark_config_read SPARKYARD_MODEL "$file")}"
+    SPARK_KEY="${LITELLM_MASTER_KEY:-$(_env_file_read LITELLM_MASTER_KEY "$file")}"
+    SPARK_DEFAULT_MODEL="${SPARKYARD_MODEL:-$(_env_file_read SPARKYARD_MODEL "$file")}"
 
     if [ -z "$SPARK_KEY" ]; then
         error "No LiteLLM master key found for the sparkyard backend."
@@ -1032,6 +1032,117 @@ cmd_spark_status() {
         validate_model "$1"
         _spark_preflight "$1"
     fi
+}
+
+# ── ComfyUI backend ──────────────────────────────────────────────────
+
+COMFY_DEFAULT_CONTAINER="comfyui"
+COMFY_DEFAULT_PORT="8188"
+
+comfy_config_path() {
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/comfyui.env"
+}
+
+# Each key independently: real env var, then config file, then default.
+# There is no secret here — unlike sparkyard, ComfyUI has no credential to
+# leak — so there is no permissions warning and no firewall guard.
+_load_comfy_env() {
+    local file
+    file=$(comfy_config_path)
+    COMFY_CONTAINER="${COMFYUI_CONTAINER:-$(_env_file_read COMFYUI_CONTAINER "$file")}"
+    COMFY_CONTAINER="${COMFY_CONTAINER:-$COMFY_DEFAULT_CONTAINER}"
+    COMFY_URL_OVERRIDE="${COMFYUI_URL:-$(_env_file_read COMFYUI_URL "$file")}"
+    COMFY_NETWORK_OVERRIDE="${COMFYUI_NETWORK:-$(_env_file_read COMFYUI_NETWORK "$file")}"
+    COMFY_WORKFLOWS_OVERRIDE="${COMFYUI_WORKFLOWS:-$(_env_file_read COMFYUI_WORKFLOWS "$file")}"
+}
+
+# One `docker inspect` yields network, address, workflow directory and
+# published port. Returns 1 with a reason in COMFY_DISCOVER_ERROR rather than
+# exiting: a sandbox whose ComfyUI is down should still start.
+_comfy_discover() {
+    COMFY_DISCOVER_ERROR=""
+    COMFY_NETWORK=""; COMFY_IP=""; COMFY_URL=""
+    COMFY_WORKFLOWS_DIR=""; COMFY_HOST_URL=""
+
+    local running
+    running=$(docker inspect --format '{{.State.Running}}' "$COMFY_CONTAINER" 2>/dev/null) || running=""
+    if [ "$running" != "true" ]; then
+        COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' is not running"
+        return 1
+    fi
+
+    local netjson names count
+    netjson=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$COMFY_CONTAINER" 2>/dev/null) || netjson="{}"
+    if [ -n "$COMFY_NETWORK_OVERRIDE" ]; then
+        COMFY_NETWORK="$COMFY_NETWORK_OVERRIDE"
+    else
+        names=$(yq -p json -r 'keys | .[]' <<<"$netjson" 2>/dev/null) || names=""
+        count=$(printf '%s\n' "$names" | grep -c . ) || count=0
+        if [ "$count" = "1" ]; then
+            COMFY_NETWORK=$(printf '%s\n' "$names" | grep . )
+        else
+            COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' is on $count networks ($(printf '%s' "$names" | tr '\n' ' ')); set COMFYUI_NETWORK in $(comfy_config_path)"
+            return 1
+        fi
+    fi
+
+    # strenv passes the network name as DATA, never as a yq expression.
+    COMFY_IP=$(net="$COMFY_NETWORK" yq -p json -r '.[strenv(net)].IPAddress // ""' <<<"$netjson" 2>/dev/null) || COMFY_IP=""
+
+    if [ -n "$COMFY_URL_OVERRIDE" ]; then
+        COMFY_URL="${COMFY_URL_OVERRIDE%/}"
+    else
+        # The container's own network alias and ComfyUI's INTERNAL port.
+        # Container to container: the host's published port is irrelevant here.
+        COMFY_URL="http://${COMFY_CONTAINER}:${COMFY_DEFAULT_PORT}"
+    fi
+
+    if [ -n "$COMFY_WORKFLOWS_OVERRIDE" ]; then
+        COMFY_WORKFLOWS_DIR="$COMFY_WORKFLOWS_OVERRIDE"
+    else
+        local workdir
+        workdir=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$COMFY_CONTAINER" 2>/dev/null) || workdir=""
+        case "$workdir" in
+            ""|"<no value>") ;;
+            *) COMFY_WORKFLOWS_DIR="$workdir/workflows" ;;
+        esac
+    fi
+
+    # The published port, for the HOST-side preflight only. ComfyUI is
+    # published on loopback, so this is how the host can reach it at all.
+    local portjson hostport
+    portjson=$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$COMFY_CONTAINER" 2>/dev/null) || portjson="{}"
+    hostport=$(key="${COMFY_DEFAULT_PORT}/tcp" yq -p json -r '.[strenv(key)][0].HostPort // ""' <<<"$portjson" 2>/dev/null) || hostport=""
+    [ -n "$hostport" ] && COMFY_HOST_URL="http://127.0.0.1:${hostport}"
+
+    return 0
+}
+
+# Warns, never exits: a slow or unhealthy ComfyUI should not block a launch.
+_comfy_preflight() {
+    local health
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$COMFY_CONTAINER" 2>/dev/null) || health="none"
+    case "$health" in
+        starting)
+            warn "ComfyUI is still starting — a cold start builds the overlay venv; budget up to 300s." ;;
+        unhealthy)
+            warn "ComfyUI reports unhealthy: it may be running on the CPU, or still loading." ;;
+    esac
+    if [ -n "$COMFY_HOST_URL" ]; then
+        curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/system_stats" >/dev/null 2>&1 \
+            || warn "ComfyUI did not answer at ${COMFY_HOST_URL}/system_stats"
+    fi
+}
+
+# Runs docker, or prints the invocation when SANDBOX_DRY_RUN=1.
+_comfy_run() {
+    if [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+        printf 'docker'
+        printf ' %s' "$@"
+        printf '\n'
+        return 0
+    fi
+    docker "$@"
 }
 
 # ── Commands ─────────────────────────────────────────────────────────
@@ -1384,6 +1495,38 @@ _build_docker_args() {
     done < <(config_get '.features[]')
     if $has_ollama; then
         DOCKER_ARGS+=("-v" "sandbox-ollama-models:/home/node/.ollama")
+    fi
+
+    # ComfyUI — same feature-detection shape as Ollama above, so every
+    # container-launching command inherits this without knowing about it.
+    local has_comfyui=false
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+    if $has_comfyui; then
+        _load_comfy_env
+        if _comfy_discover; then
+            _comfy_preflight
+            DOCKER_ARGS+=("--network" "$COMFY_NETWORK")
+            DOCKER_ARGS+=("-e" "COMFYUI_URL=$COMFY_URL")
+            if [ -n "$COMFY_IP" ]; then
+                # Distinct from SANDBOX_ALLOWED_DOMAINS on purpose: this value
+                # is derived by the CLI, not supplied by a committed config.
+                DOCKER_ARGS+=("-e" "SANDBOX_COMFYUI_IP=$COMFY_IP")
+            fi
+            if [ -n "$COMFY_WORKFLOWS_DIR" ] && [ -d "$COMFY_WORKFLOWS_DIR" ]; then
+                # A compose label is data from outside this script, so it gets
+                # the same validation a committed mounts: entry would.
+                validate_mount "$COMFY_WORKFLOWS_DIR"
+                DOCKER_ARGS+=("-v" "${VALIDATED_MOUNT_PATH}:/opt/comfy-workflows:ro")
+                DOCKER_ARGS+=("-e" "COMFY_WORKFLOWS=/opt/comfy-workflows")
+            elif [ -n "$COMFY_WORKFLOWS_DIR" ]; then
+                warn "ComfyUI workflow directory not found at $COMFY_WORKFLOWS_DIR — 'comfy workflows' will be empty."
+            fi
+        else
+            warn "ComfyUI not available: ${COMFY_DISCOVER_ERROR}."
+            warn "The sandbox will start without it; 'comfy' will say it is not wired in."
+        fi
     fi
 
     # Absolute physical path of the config file, computed ONCE, here, before
