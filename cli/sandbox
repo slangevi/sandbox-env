@@ -1145,6 +1145,83 @@ _comfy_run() {
     docker "$@"
 }
 
+cmd_comfy_status() {
+    _load_comfy_env
+    echo "ComfyUI backend configuration"
+    echo "  config file:  $(comfy_config_path)"
+    echo "  container:    $COMFY_CONTAINER"
+    if _comfy_discover; then
+        echo "  network:      $COMFY_NETWORK"
+        echo "  address:      ${COMFY_IP:-(unknown)}"
+        echo "  url:          $COMFY_URL"
+        echo "  workflows:    ${COMFY_WORKFLOWS_DIR:-(none found)}"
+        _comfy_preflight
+        if [ -n "$COMFY_HOST_URL" ]; then
+            local folders
+            folders=$(curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/models" 2>/dev/null \
+                | yq -p json -r '.[]' 2>/dev/null) || folders=""
+            local folder names n
+            while IFS= read -r folder; do
+                [ -z "$folder" ] && continue
+                names=$(curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/models/${folder}" 2>/dev/null \
+                    | yq -p json -r '.[]' 2>/dev/null) || names=""
+                n=$(printf '%s\n' "$names" | grep -c . ) || n=0
+                [ "$n" = "0" ] && continue
+                printf '  models:       %s (%s)\n' "$folder" "$n"
+            done <<<"$folders"
+        fi
+    else
+        warn "ComfyUI not available: ${COMFY_DISCOVER_ERROR}."
+    fi
+}
+
+cmd_comfy() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    # Feature check FIRST: a project with neither the feature nor a built
+    # image should be told about the missing feature, not "image not
+    # found" — the feature is the cheaper check and the more specific
+    # diagnosis (fixing the image doesn't fix a missing feature, but adding
+    # the feature always requires a rebuild anyway).
+    local has_comfyui=false
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+    if ! $has_comfyui; then
+        error "This project does not have the 'comfyui' feature."
+        error "Add it to features: in $CONFIG_FILE, then: sandbox build"
+        exit 1
+    fi
+
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _build_docker_args "$name"
+
+    # DOCKER_ARGS begins with `--name sandbox-<name>`, which would collide
+    # with an already-running sandbox of the same project. Drop the flag AND
+    # its value — a `${DOCKER_ARGS[@]:1}` slice drops only the flag, leaving
+    # the name behind as a stray argument to `docker run`.
+    local args=() skip=0 a
+    for a in "${DOCKER_ARGS[@]}"; do
+        if [ "$skip" = "1" ]; then skip=0; continue; fi
+        if [ "$a" = "--name" ]; then skip=1; continue; fi
+        args+=("$a")
+    done
+
+    _comfy_run run --rm "${args[@]}" \
+        "sandbox-${name}:latest" \
+        bash -lc 'comfy "$@"' _ "$@"
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_build_base() {
@@ -1510,9 +1587,33 @@ _build_docker_args() {
             DOCKER_ARGS+=("--network" "$COMFY_NETWORK")
             DOCKER_ARGS+=("-e" "COMFYUI_URL=$COMFY_URL")
             if [ -n "$COMFY_IP" ]; then
-                # Distinct from SANDBOX_ALLOWED_DOMAINS on purpose: this value
-                # is derived by the CLI, not supplied by a committed config.
-                DOCKER_ARGS+=("-e" "SANDBOX_COMFYUI_IP=$COMFY_IP")
+                # This value flows straight into init-firewall.sh's
+                # allowed-domains ipset as an IP literal, so it gets the same
+                # treatment as every other externally-derived value this CLI
+                # forwards into a container (env keys, mounts, git config
+                # keys, claude args, allowed_domains): accept only a bare
+                # IPv4 dotted-quad. A CIDR like 0.0.0.0/0 here would defeat
+                # strict mode's default-DROP policy entirely, and a newline
+                # would add more than one ipset entry — so both are checked
+                # explicitly rather than trusted to the regex's own anchors.
+                # Unreachable today (COMFY_IP comes from `docker inspect`'s
+                # IPAddress field, which is always well-formed), but a value
+                # landing in a firewall allowlist has the strongest claim of
+                # any of them to being validated anyway.
+                case "$COMFY_IP" in
+                    *$'\n'*|*$'\r'*)
+                        warn "ComfyUI address '$COMFY_IP' contains a newline — refusing to add it to the firewall allowlist." ;;
+                    *)
+                        if [[ "$COMFY_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                            # Distinct from SANDBOX_ALLOWED_DOMAINS on
+                            # purpose: this value is derived by the CLI, not
+                            # supplied by a committed config.
+                            DOCKER_ARGS+=("-e" "SANDBOX_COMFYUI_IP=$COMFY_IP")
+                        else
+                            warn "ComfyUI address '$COMFY_IP' is not a plain IPv4 address — refusing to add it to the firewall allowlist."
+                        fi
+                        ;;
+                esac
             fi
             if [ -n "$COMFY_WORKFLOWS_DIR" ] && [ -d "$COMFY_WORKFLOWS_DIR" ]; then
                 # A compose label is data from outside this script, so it gets
@@ -2837,6 +2938,8 @@ Commands:
   ollama <cmd>        Run Ollama commands in the sandbox
   llm [--spark] [args]  Run the llm CLI in the sandbox
   spark-status [model]  Show sparkyard backend config (and check a model)
+  comfy <args>        Run the comfy helper (generate images/video)
+  comfy-status        Show ComfyUI backend configuration and installed models
   login               Authenticate Claude Code for this project
   trust               Mark /workspace trusted for headless runs (sets the flag in the Claude volume)
   exec <cmd>          Run a command in the running sandbox
@@ -2870,6 +2973,8 @@ case "${1:-help}" in
     ollama)         shift; cmd_ollama "$@" ;;
     llm)            shift; cmd_llm "$@" ;;
     spark-status)   shift; cmd_spark_status "$@" ;;
+    comfy)          shift; cmd_comfy "$@" ;;
+    comfy-status)   shift; cmd_comfy_status "$@" ;;
     login)          cmd_login ;;
     trust)          cmd_trust ;;
     exec)           cmd_exec "$@" ;;

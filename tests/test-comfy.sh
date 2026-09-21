@@ -75,6 +75,50 @@ run_dry() {
 check_output "missing container warns rather than failing" "ComfyUI not available" run_dry comfy-status
 check_output "warning names the container" "definitely-not-running" run_dry comfy-status
 
+echo "-- firewall input validation (R13) --"
+# _build_docker_args passes COMFY_IP straight into init-firewall.sh's
+# allowed-domains ipset as an IP literal (SANDBOX_COMFYUI_IP). Real `docker
+# inspect` output is always a well-formed dotted-quad, so a malformed value
+# can't be produced through a live container — this shim fakes `docker` so
+# `_comfy_discover` sees a network whose IPAddress is "0.0.0.0/0" (a CIDR
+# that would defeat strict mode's default-DROP policy if it ever reached the
+# ipset), and proves _build_docker_args's guard refuses to forward it.
+SHIM="$TMP/shim"
+mkdir -p "$SHIM"
+cat > "$SHIM/docker" <<'SHIMEOF'
+#!/bin/bash
+case "$1" in
+    image)
+        echo "fake-image-id"
+        exit 0
+        ;;
+    inspect)
+        fmt="$3"
+        case "$fmt" in
+            *State.Running*)             echo "true" ;;
+            *NetworkSettings.Networks*)  echo '{"bridge":{"IPAddress":"0.0.0.0/0"}}' ;;
+            *Config.Labels*)             echo "<no value>" ;;
+            *NetworkSettings.Ports*)     echo "{}" ;;
+            *State.Health*)              echo "none" ;;
+            *) echo "" ;;
+        esac
+        exit 0
+        ;;
+esac
+exit 1
+SHIMEOF
+chmod +x "$SHIM/docker"
+
+run_shimmed() {
+    (cd "$PROJ" && XDG_CONFIG_HOME="$TMP/empty" SANDBOX_DRY_RUN=1 \
+        COMFYUI_CONTAINER="shimmed" PATH="$SHIM:$PATH" "$SANDBOX" "$@")
+}
+
+check_output "malformed address is refused rather than forwarded" \
+    "not a plain IPv4 address" run_shimmed comfy status
+check_not_output "and the docker invocation never carries it" \
+    "SANDBOX_COMFYUI_IP" run_shimmed comfy status
+
 echo "-- feature detection --"
 NOCOMFY="$TMP/nocomfy"
 mkdir -p "$NOCOMFY"
