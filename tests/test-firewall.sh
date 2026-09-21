@@ -83,6 +83,21 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+echo "-- ComfyUI address --"
+# A CLI-derived address reaches the ipset through the same IP-literal path
+# allowed_domains entries use. Use ipset test which runs as root via --entrypoint.
+if docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
+    -e SANDBOX_FIREWALL=strict \
+    -e SANDBOX_COMFYUI_IP=172.20.0.2 \
+    --entrypoint bash sandbox-base:latest -c \
+    '/usr/local/bin/init-firewall.sh >/dev/null 2>&1 && ipset test allowed-domains 172.20.0.2' 2>/dev/null; then
+    echo "  PASS: SANDBOX_COMFYUI_IP reaches the ipset"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: SANDBOX_COMFYUI_IP missing from the ipset"
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

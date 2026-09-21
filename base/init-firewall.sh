@@ -65,6 +65,13 @@ collect_domains() {
     if [ -n "${SANDBOX_ALLOWED_DOMAINS:-}" ]; then
         echo "$SANDBOX_ALLOWED_DOMAINS" | tr ',' '\n'
     fi
+    # The ComfyUI container's address, derived by the CLI from a running
+    # container — deliberately separate from SANDBOX_ALLOWED_DOMAINS, which
+    # is user-supplied. An IPv4 literal, so the loop below adds it to the
+    # ipset directly with nothing for dig to resolve.
+    if [ -n "${SANDBOX_COMFYUI_IP:-}" ]; then
+        echo "$SANDBOX_COMFYUI_IP"
+    fi
 }
 
 while read -r domain; do
