@@ -1,0 +1,5 @@
+{
+  "last_node_id": 9,
+  "nodes": [{ "id": 3, "type": "KSampler" }],
+  "links": [[1, 4, 0, 3, 0, "MODEL"]]
+}

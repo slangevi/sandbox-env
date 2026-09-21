@@ -36,6 +36,320 @@ api_get() {
     printf '%s' "$body"
 }
 
+# ── workflows ────────────────────────────────────────────────────────
+
+list_workflow_names() {
+    local f
+    [ -d "$COMFY_WORKFLOWS" ] || return 0
+    for f in "$COMFY_WORKFLOWS"/*.json; do
+        [ -f "$f" ] || continue
+        case "$f" in *.params.json) continue ;; esac
+        basename "$f" .json
+    done
+}
+
+resolve_workflow() {
+    local ref="$1"
+    if [ -f "$ref" ]; then printf '%s' "$ref"; return 0; fi
+    if [ -f "$COMFY_WORKFLOWS/$ref" ]; then printf '%s' "$COMFY_WORKFLOWS/$ref"; return 0; fi
+    if [ -f "$COMFY_WORKFLOWS/$ref.json" ]; then printf '%s' "$COMFY_WORKFLOWS/$ref.json"; return 0; fi
+    die "no workflow '$ref'. Available in $COMFY_WORKFLOWS:
+$(list_workflow_names | sed 's/^/  /')" "$EX_USAGE"
+}
+
+manifest_path() { printf '%s' "${1%.json}.params.json"; }
+
+# The single most common mistake is exporting from the ComfyUI menu, which
+# produces a UI graph the /prompt endpoint cannot execute. Name it exactly.
+assert_api_format() {
+    local wf="$1"
+    jq -e . "$wf" >/dev/null 2>&1 || die "$wf is not valid JSON" "$EX_USAGE"
+    if jq -e 'type == "object" and has("nodes") and has("links")' "$wf" >/dev/null 2>&1; then
+        die "$wf looks like a ComfyUI UI export, not API format.
+  In ComfyUI: Workflow -> Export (API). API format is a flat map of
+  node id -> {class_type, inputs}." "$EX_USAGE"
+    fi
+    jq -e 'type == "object" and (length > 0)
+           and all(.[]; type == "object" and has("class_type"))' "$wf" >/dev/null 2>&1 \
+        || die "$wf is not a ComfyUI API-format workflow (expected node id -> {class_type, inputs})" "$EX_USAGE"
+}
+
+workflow_for_tag() {
+    local tag="$1" name wf mf best=""
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        wf="$COMFY_WORKFLOWS/$name.json"
+        mf=$(manifest_path "$wf")
+        [ -f "$mf" ] || continue
+        jq -e --arg t "$tag" '(.tags // []) | index($t)' "$mf" >/dev/null 2>&1 || continue
+        if jq -e '(.tags // []) | index("default")' "$mf" >/dev/null 2>&1; then
+            printf '%s' "$wf"; return 0
+        fi
+        [ -z "$best" ] && best="$wf"
+    done < <(list_workflow_names)
+    [ -n "$best" ] || die "no workflow tagged '$tag' in $COMFY_WORKFLOWS. Available:
+$(list_workflow_names | sed 's/^/  /')
+  Tag one by adding \"tags\": [\"$tag\"] to its .params.json manifest." "$EX_USAGE"
+    printf '%s' "$best"
+}
+
+# ── parameter injection ──────────────────────────────────────────────
+
+# "6.inputs.text" -> ["6","inputs","text"]
+json_path_array() { printf '%s' "$1" | jq -R 'split(".")'; }
+
+# set_in_graph <graph-json> <path> <type> <value> -> new graph on stdout.
+# Types are injected as real JSON types: ComfyUI rejects "42" where it wants 42.
+set_in_graph() {
+    local graph="$1" path="$2" type="$3" value="$4" p
+    p=$(json_path_array "$path")
+    case "$type" in
+        int)
+            [[ "$value" =~ ^-?[0-9]+$ ]] \
+                || die "parameter at $path must be an integer (got '$value')" "$EX_USAGE"
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        float)
+            [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] \
+                || die "parameter at $path must be a number (got '$value')" "$EX_USAGE"
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        bool)
+            case "$value" in
+                true|false) ;;
+                *) die "parameter at $path must be true or false (got '$value')" "$EX_USAGE" ;;
+            esac
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        *)
+            jq --argjson p "$p" --arg v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+    esac
+}
+
+validate_model_value() {
+    local folder="$1" value="$2" names
+    names=$(api_get "/models/$folder" | jq -r '.[]?') || exit $?
+    grep -Fxq -- "$value" <<<"$names" && return 0
+    die "model '$value' is not installed in $folder. Available:
+$(sed 's/^/  /' <<<"$names")" "$EX_USAGE"
+}
+
+first_model() { api_get "/models/$1" | jq -r '.[0] // empty'; }
+
+random_seed() {
+    local hex
+    hex=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%d' $(( 0x$hex & 0x7fffffff ))
+}
+
+# ── job lifecycle ────────────────────────────────────────────────────
+
+submit_graph() {
+    local graph="$1" payload body code msg
+    payload=$(jq -n --argjson p "$graph" --arg cid "sandbox-comfy" \
+        '{prompt: $p, client_id: $cid}')
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
+        -X POST -H 'Content-Type: application/json' --data-binary @- \
+        "${COMFYUI_URL}/prompt" <<<"$payload" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    if [ "$code" != "200" ]; then
+        msg=$(jq -r '[(.error.message // .error // "unknown error"),
+                      ((.node_errors // {}) | to_entries[]
+                       | "  node \(.key): \([.value.errors[]?.message] | join("; "))")]
+                     | join("\n")' <<<"$body" 2>/dev/null) || msg="$body"
+        die "ComfyUI rejected the workflow (HTTP $code):
+$msg" "$EX_EXEC"
+    fi
+    jq -r '.prompt_id' <<<"$body"
+}
+
+wait_for_job() {
+    local pid="$1" timeout="$2" waited=0 hist status detail
+    while :; do
+        hist=$(api_get "/history/$pid") || exit $?
+        status=$(jq -r --arg id "$pid" '.[$id].status.status_str // "pending"' <<<"$hist")
+        case "$status" in
+            success) return 0 ;;
+            error)
+                detail=$(jq -r --arg id "$pid" '
+                    .[$id].status.messages[]? | select(.[0] == "execution_error") | .[1]
+                    | "  node \(.node_id) (\(.node_type)): \(.exception_message)"' <<<"$hist")
+                die "ComfyUI execution failed:
+$detail" "$EX_EXEC" ;;
+        esac
+        if [ "$waited" -ge "$timeout" ]; then
+            die "timed out after ${timeout}s waiting for $pid.
+  The job may still be running on the GPU. Retrieve it with:
+    comfy fetch $pid" "$EX_TIMEOUT"
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+# Writes every output of a finished job into <outdir>, printing each path.
+download_outputs() {
+    local pid="$1" out="$2" hist fn sub typ safe dest n
+    mkdir -p "$out" || die "cannot create output directory $out" "$EX_USAGE"
+    hist=$(api_get "/history/$pid") || exit $?
+    while IFS=$'\t' read -r fn sub typ; do
+        [ -z "$fn" ] && continue
+        # Filenames come from ComfyUI — i.e. off the network. Reduce to a
+        # basename BEFORE the value is ever used as a local path.
+        safe=$(basename -- "$fn")
+        case "$safe" in ""|.|..) continue ;; esac
+        dest="$out/$safe"
+        n=1
+        while [ -e "$dest" ]; do
+            dest="$out/${safe%.*}-${n}.${safe##*.}"
+            n=$((n + 1))
+        done
+        curl -sS -G --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" -o "$dest" \
+            --data-urlencode "filename=$fn" \
+            --data-urlencode "subfolder=$sub" \
+            --data-urlencode "type=$typ" \
+            "${COMFYUI_URL}/view" \
+            || die "failed downloading $safe from $COMFYUI_URL" "$EX_UNREACHABLE"
+        printf '%s\n' "$dest"
+    done < <(jq -r --arg id "$pid" '
+        .[$id].outputs // {} | to_entries[] | .value | to_entries[] | .value
+        | if type == "array" then .[] else empty end
+        | select(type == "object" and has("filename"))
+        | [.filename, (.subfolder // ""), (.type // "output")] | @tsv' <<<"$hist")
+}
+
+# ── run ──────────────────────────────────────────────────────────────
+
+# run_workflow <workflow> <outdir> <timeout> <json:0|1> [key=value ...]
+run_workflow() {
+    local wf="$1" out="$2" timeout="$3" want_json="$4"; shift 4
+    local mf graph pid seed_used="" files elapsed start
+
+    assert_api_format "$wf"
+    mf=$(manifest_path "$wf")
+    graph=$(cat "$wf")
+
+    local pair key value path type folder
+    for pair in "$@"; do
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        path=""; type="string"; folder=""
+        if [ -f "$mf" ]; then
+            path=$(jq -r --arg k "$key" '.params[$k].path // empty' "$mf")
+            if [ -n "$path" ]; then
+                type=$(jq -r --arg k "$key" '.params[$k].type // "string"' "$mf")
+                folder=$(jq -r --arg k "$key" '.params[$k].folder // empty' "$mf")
+            fi
+        fi
+        if [ -z "$path" ]; then
+            # Not a manifest name: accept a raw node path, inferring the type
+            # from the value's shape.
+            if [[ "$key" =~ ^[A-Za-z0-9_-]+\.inputs\.[A-Za-z0-9_]+$ ]]; then
+                path="$key"
+                if   [[ "$value" =~ ^-?[0-9]+$ ]]; then type="int"
+                elif [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]]; then type="float"
+                elif [ "$value" = "true" ] || [ "$value" = "false" ]; then type="bool"
+                else type="string"; fi
+            else
+                die "unknown parameter '$key'. This workflow accepts:
+$( [ -f "$mf" ] && jq -r '.params | keys[]' "$mf" | sed 's/^/  /' )
+  ...or a raw node path such as 3.inputs.seed. Node ids here:
+$(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
+            fi
+        fi
+        if [ "$type" = "model" ] && [ -n "$folder" ]; then
+            validate_model_value "$folder" "$value"
+            type="string"
+        fi
+        [ "$key" = "seed" ] && seed_used="$value"
+        graph=$(set_in_graph "$graph" "$path" "$type" "$value") || exit $?
+    done
+
+    # Manifest defaults for anything not overridden above.
+    if [ -f "$mf" ]; then
+        local dkey dpath dtype ddefault dfolder current
+        while IFS= read -r dkey; do
+            [ -z "$dkey" ] && continue
+            dpath=$(jq -r --arg k "$dkey" '.params[$k].path' "$mf")
+            # Skip if already supplied, whether by manifest name (prompt=...)
+            # or by the raw node path it maps to (6.inputs.text=...).
+            case " $* " in *" $dkey="*|*" $dpath="*) continue ;; esac
+            dtype=$(jq -r --arg k "$dkey" '.params[$k].type // "string"' "$mf")
+            dfolder=$(jq -r --arg k "$dkey" '.params[$k].folder // empty' "$mf")
+            ddefault=$(jq -r --arg k "$dkey" '.params[$k].default // empty' "$mf")
+            if [ "$dtype" = "model" ] && [ -n "$dfolder" ]; then
+                # A model parameter left at a __PLACEHOLDER__ resolves to the
+                # first installed model, matching verify-e2e.sh's behaviour.
+                current=$(jq -r --argjson p "$(json_path_array "$dpath")" \
+                    'getpath($p) // ""' <<<"$graph")
+                case "$current" in
+                    ""|__*__)
+                        ddefault=$(first_model "$dfolder")
+                        [ -n "$ddefault" ] \
+                            || die "no models installed in $dfolder — nothing to generate with" "$EX_USAGE"
+                        printf 'comfy: using %s from %s\n' "$ddefault" "$dfolder" >&2
+                        graph=$(set_in_graph "$graph" "$dpath" "string" "$ddefault")
+                        ;;
+                esac
+                continue
+            fi
+            if [ "$ddefault" = "random" ] && [ "$dtype" = "int" ]; then
+                ddefault=$(random_seed)
+                seed_used="$ddefault"
+            fi
+            [ -z "$ddefault" ] && continue
+            graph=$(set_in_graph "$graph" "$dpath" "$dtype" "$ddefault") || exit $?
+        done < <(jq -r '.params | keys[]' "$mf")
+
+        local missing
+        missing=$(jq -r '.params | to_entries[] | select(.value.required == true) | .key' "$mf")
+        while IFS= read -r dkey; do
+            [ -z "$dkey" ] && continue
+            case " $* " in
+                *" $dkey="*) ;;
+                *) die "'$dkey' is required by $(basename "$mf"). Add --set $dkey=..." "$EX_USAGE" ;;
+            esac
+        done <<<"$missing"
+    fi
+
+    start=$SECONDS
+    pid=$(submit_graph "$graph") || exit $?
+    # Ctrl-C between submission and completion must not lose the job: it is
+    # still running on the GPU and its outputs are still retrievable.
+    trap 'printf "\ncomfy: interrupted. The job may still be running:\n  comfy fetch %s\n" "$pid" >&2; exit 130' INT
+    wait_for_job "$pid" "$timeout" || exit $?
+    trap - INT
+    files=$(download_outputs "$pid" "$out") || exit $?
+    elapsed=$((SECONDS - start))
+
+    if [ "$want_json" = "1" ]; then
+        jq -n --arg id "$pid" --arg seed "$seed_used" --argjson el "$elapsed" \
+            --argjson files "$(printf '%s\n' "$files" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+            '{prompt_id: $id, status: "success", seed: $seed, elapsed: $el, files: $files}'
+    else
+        printf '%s\n' "$files"
+    fi
+}
+
+cmd_run() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy run <workflow|path> [--set key=value]... [--out DIR]" "$EX_USAGE"
+    local ref="$1"; shift
+    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
+    local sets=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --set)     sets+=("$2"); shift 2 ;;
+            --out)     out="$2"; shift 2 ;;
+            --timeout) timeout="$2"; shift 2 ;;
+            --json)    want_json=1; shift ;;
+            *)         die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    local wf
+    wf=$(resolve_workflow "$ref") || exit $?
+    run_workflow "$wf" "$out" "$timeout" "$want_json" "${sets[@]+"${sets[@]}"}"
+}
+
 cmd_status() {
     require_url
     local stats queue
@@ -75,6 +389,7 @@ comfy — generate images and video through a ComfyUI instance
 
   comfy status                 ComfyUI version, device, free VRAM, queue depth
   comfy models [FOLDER]        installed models, by folder
+  comfy run WF [--set k=v]...  run a workflow; --out DIR, --timeout S, --json
 
 Environment:
   COMFYUI_URL        base URL of the ComfyUI API (set by the sandbox CLI)
@@ -85,6 +400,7 @@ USAGE
 case "${1:-help}" in
     status)         shift; cmd_status "$@" ;;
     models)         shift; cmd_models "$@" ;;
+    run)            shift; cmd_run "$@" ;;
     help|-h|--help) usage ;;
     *)              printf 'comfy: unknown command: %s\n\n' "$1" >&2; usage >&2; exit "$EX_USAGE" ;;
 esac
