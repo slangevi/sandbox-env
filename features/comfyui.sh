@@ -15,6 +15,11 @@ done
 
 install -m 0755 /tmp/comfyui.d/comfy /usr/local/bin/comfy
 
+# Inert here (this feature installs no packages), but the feature contract in
+# CLAUDE.md and README lists it as mandatory — kept so the contract holds for
+# every feature script, including one that later grows an apt-get.
+rm -rf /var/lib/apt/lists/*
+
 # No /etc/sandbox/firewall.d/comfyui.conf: the target is an IP on a Docker
 # network, not a resolvable domain. The CLI passes it via SANDBOX_COMFYUI_IP.
 
