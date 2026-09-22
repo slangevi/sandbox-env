@@ -1116,10 +1116,20 @@ _comfy_discover() {
 
     local netjson names count
     netjson=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$COMFY_CONTAINER" 2>/dev/null) || netjson="{}"
+    names=$(yq -p json -r 'keys | .[]' <<<"$netjson" 2>/dev/null) || names=""
     if [ -n "$COMFY_NETWORK_OVERRIDE" ]; then
         COMFY_NETWORK="$COMFY_NETWORK_OVERRIDE"
+        # An override naming a network the container is NOT on used to be
+        # accepted silently: the IPAddress lookup below then yielded "", the
+        # firewall entry was skipped, and every later `comfy` call failed with
+        # a bare "unreachable" that named neither the override nor the
+        # mistake. Refuse it here, where the container's actual networks are
+        # in hand to name in the message.
+        if ! grep -Fxq -- "$COMFY_NETWORK" <<<"$names"; then
+            COMFY_DISCOVER_ERROR="COMFYUI_NETWORK='$COMFY_NETWORK' is not one of the networks container '$COMFY_CONTAINER' is on ($(printf '%s' "$names" | tr '\n' ' ')); fix it in $(comfy_config_path)"
+            return 1
+        fi
     else
-        names=$(yq -p json -r 'keys | .[]' <<<"$netjson" 2>/dev/null) || names=""
         count=$(printf '%s\n' "$names" | grep -c . ) || count=0
         if [ "$count" = "1" ]; then
             COMFY_NETWORK=$(printf '%s\n' "$names" | grep . )
@@ -1129,11 +1139,40 @@ _comfy_discover() {
         fi
     fi
 
+    # Three network MODES are not networks a second container can join, and
+    # handing any of them to `docker run --network` is actively destructive
+    # here: this CLI also passes --cap-add NET_ADMIN/NET_RAW, so a sandbox
+    # started with `--network host` runs init-firewall.sh's `iptables -F` and
+    # `iptables -P OUTPUT DROP` against the HOST's own network stack. A GPU
+    # ComfyUI on `network_mode: host` is a common setup, and `docker inspect`
+    # reports it as a single network named "host" — indistinguishable, to the
+    # count check above, from a real user-defined network. Refuse all three
+    # (`none` gives the sandbox no network at all; `container:<id>` shares
+    # another container's stack) and name the remedy: reaching ComfyUI
+    # through the host gateway instead, which _build_docker_args wires up
+    # from the override even though discovery failed here.
+    case "$COMFY_NETWORK" in
+        host|none|container:*)
+            COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' uses network mode '$COMFY_NETWORK', which a sandbox cannot join; set COMFYUI_URL=http://host.docker.internal:${COMFY_DEFAULT_PORT} in $(comfy_config_path) to reach it through the host gateway instead"
+            return 1 ;;
+    esac
+
     # strenv passes the network name as DATA, never as a yq expression.
     COMFY_IP=$(net="$COMFY_NETWORK" yq -p json -r '.[strenv(net)].IPAddress // ""' <<<"$netjson" 2>/dev/null) || COMFY_IP=""
 
     if [ -n "$COMFY_URL_OVERRIDE" ]; then
         COMFY_URL="${COMFY_URL_OVERRIDE%/}"
+    elif [ "$COMFY_NETWORK" = "bridge" ] \
+            && [[ "$COMFY_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        # Docker's embedded DNS resolves container names on USER-DEFINED
+        # networks only; the default `bridge` has no name resolution at all.
+        # A ComfyUI started with a plain `docker run` (no compose project, no
+        # --network) lands there, discovery succeeds, and the container-name
+        # URL below would then never resolve inside the sandbox. Address it
+        # by IP instead — the same dotted-quad shape the firewall entry
+        # below insists on, checked here too so a malformed address cannot
+        # become a malformed URL.
+        COMFY_URL="http://${COMFY_IP}:${COMFY_DEFAULT_PORT}"
     else
         # The container's own network alias and ComfyUI's INTERNAL port.
         # Container to container: the host's published port is irrelevant here.
@@ -1259,6 +1298,45 @@ cmd_comfy() {
         if [ "$a" = "--name" ]; then skip=1; continue; fi
         args+=("$a")
     done
+
+    # _build_docker_args only adds the default `$(pwd):/workspace` mount when
+    # the project defines NO mounts:. Every other caller is fine with that —
+    # the project's own mounts: are where its work lives. This one is not:
+    # `comfy` writes its outputs to ./comfy-out inside the container and
+    # prints host-looking paths for them, so without a /workspace the whole
+    # run landed in the image's own filesystem and `--rm` deleted it, exit 0,
+    # no warning. Add the default mount back when nothing else targets
+    # /workspace, built exactly as _build_docker_args builds it.
+    local has_workspace=false prev="" target
+    for a in "${args[@]}"; do
+        if [ "$prev" = "-v" ]; then
+            target="${a#*:}"; target="${target%%:*}"
+            [ "$target" = "/workspace" ] && has_workspace=true
+        fi
+        prev="$a"
+    done
+    if ! $has_workspace; then
+        args+=("-v" "$(pwd):/workspace")
+        # That mount also re-exposes sandbox.yaml, which _build_docker_args
+        # went out of its way to protect. Re-apply the same read-only overlay
+        # here rather than handing a ComfyUI-supplied output filename (they
+        # are basename-reduced, but a basename of "sandbox.yaml" is a
+        # basename) a writable path to the config that governs the next run.
+        # Warn-and-skip on a colon, rather than _build_docker_args's hard
+        # exit: this is the ComfyUI path, where nothing blocks a launch.
+        local comfy_cfg_abs
+        comfy_cfg_abs="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd -P)/$(basename -- "$CONFIG_FILE")"
+        if [ "${SANDBOX_ALLOW_WRITABLE_CONFIG:-0}" = "1" ]; then
+            warn "SANDBOX_ALLOW_WRITABLE_CONFIG=1 — $CONFIG_FILE is writable in this container."
+        else
+            case "$comfy_cfg_abs" in
+                *:*|*$'\n'*|*$'\r'*)
+                    warn "Not protecting $CONFIG_FILE — its resolved path contains a ':' or a newline." ;;
+                *)
+                    args+=("-v" "${comfy_cfg_abs}:/workspace/$(basename -- "$CONFIG_FILE"):ro") ;;
+            esac
+        fi
+    fi
 
     # No explicit --rm: _build_docker_args already emits one, and repeating it
     # produced `docker run --rm --rm` (harmless to docker, but it reads as a
@@ -1663,16 +1741,53 @@ _build_docker_args() {
             fi
             if [ -n "$COMFY_WORKFLOWS_DIR" ] && [ -d "$COMFY_WORKFLOWS_DIR" ]; then
                 # A compose label is data from outside this script, so it gets
-                # the same validation a committed mounts: entry would.
-                validate_mount "$COMFY_WORKFLOWS_DIR"
-                DOCKER_ARGS+=("-v" "${VALIDATED_MOUNT_PATH}:/opt/comfy-workflows:ro")
-                DOCKER_ARGS+=("-e" "COMFY_WORKFLOWS=/opt/comfy-workflows")
+                # the same validation a committed mounts: entry would — but
+                # NOT the same consequence. validate_mount refuses by calling
+                # `exit 1`, with a message blaming $CONFIG_FILE, so a compose
+                # project whose workflows/ resolves somewhere the validator
+                # classes as sensitive would kill every `sandbox run`/`claude`/
+                # `start` for the project, naming a file the path isn't even
+                # in. This feature's rule is warn-and-continue: an unusable
+                # ComfyUI never blocks a launch. So probe first in a SUBSHELL
+                # (where that `exit` kills only the subshell and the misleading
+                # message is discarded), and make the real call — the one that
+                # publishes VALIDATED_MOUNT_PATH, which a subshell cannot —
+                # only once the probe has proved it will not exit.
+                if ( validate_mount "$COMFY_WORKFLOWS_DIR" ) >/dev/null 2>&1; then
+                    validate_mount "$COMFY_WORKFLOWS_DIR"
+                    DOCKER_ARGS+=("-v" "${VALIDATED_MOUNT_PATH}:/opt/comfy-workflows:ro")
+                    DOCKER_ARGS+=("-e" "COMFY_WORKFLOWS=/opt/comfy-workflows")
+                else
+                    warn "ComfyUI workflow directory $COMFY_WORKFLOWS_DIR was refused by the mount validator — skipping it; 'comfy workflows' will be empty."
+                    warn "Point COMFYUI_WORKFLOWS in $(comfy_config_path) at a directory outside the credential and system paths."
+                fi
             elif [ -n "$COMFY_WORKFLOWS_DIR" ]; then
                 warn "ComfyUI workflow directory not found at $COMFY_WORKFLOWS_DIR — 'comfy workflows' will be empty."
             fi
         else
             warn "ComfyUI not available: ${COMFY_DISCOVER_ERROR}."
-            warn "The sandbox will start without it; 'comfy' will say it is not wired in."
+            # The documented remedy for a ComfyUI a sandbox cannot join on a
+            # network (network_mode: host/none/container:, or an instance not
+            # in a container at all) is COMFYUI_URL=http://host.docker.internal
+            # — which only works if the container is actually TOLD where that
+            # name points. Wire exactly that, the same way
+            # _apply_spark_backend does for the gateway: the URL plus an
+            # --add-host mapping, and NO --network (attaching the refused
+            # network is the bug this avoids). The strict firewall already
+            # permits the default gateway (init-firewall.sh step 8), so no
+            # SANDBOX_COMFYUI_IP ipset entry is needed or added here.
+            local comfy_ovr_host=""
+            if [ -n "${COMFY_URL_OVERRIDE:-}" ]; then
+                comfy_ovr_host="${COMFY_URL_OVERRIDE#*://}"
+                comfy_ovr_host="${comfy_ovr_host%%[:/]*}"
+            fi
+            if [ "$comfy_ovr_host" = "host.docker.internal" ]; then
+                DOCKER_ARGS+=("--add-host" "host.docker.internal:host-gateway")
+                DOCKER_ARGS+=("-e" "COMFYUI_URL=${COMFY_URL_OVERRIDE%/}")
+                warn "Using COMFYUI_URL=${COMFY_URL_OVERRIDE%/} through the host gateway instead."
+            else
+                warn "The sandbox will start without it; 'comfy' will say it is not wired in."
+            fi
         fi
     fi
 

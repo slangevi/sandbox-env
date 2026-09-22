@@ -667,6 +667,23 @@ COMFYUI_NETWORK=comfyui_default
 COMFYUI_WORKFLOWS=/path/to/workflows
 ```
 
+On Docker's default `bridge` network the URL is built from the container's IP
+instead of its name: Docker's embedded DNS resolves container names on
+user-defined networks only, so `http://comfyui:8188` would never resolve there.
+
+A ComfyUI running in `network_mode: host` (or `none`, or `container:`) is not
+on a network a sandbox can join — attaching one of those would hand the
+sandbox the host's own network stack, which the strict firewall would then
+rewrite. Those are refused by name, and the fix is to reach it through the
+host gateway instead:
+
+```
+COMFYUI_URL=http://host.docker.internal:8188
+```
+
+With that set, the sandbox maps `host.docker.internal` to the host gateway and
+joins no network at all. The strict firewall already allows the gateway.
+
 If ComfyUI is not running, the sandbox starts anyway and `comfy` says it is
 not wired in. With `firewall: strict`, the container's discovered address is
 also added to the strict firewall's allowlist (as a bare IPv4 literal only —
