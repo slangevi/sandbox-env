@@ -69,7 +69,7 @@ trap 'chmod 755 "$TMP/mnt-eaccess/blocked" 2>/dev/null || true; \
     sandbox-mnt-sockdir2:latest sandbox-mnt-decoy:latest \
     sandbox-mnt-colima:latest sandbox-mnt-orbstack:latest \
     sandbox-mnt-ro-cap:latest sandbox-env-bool:latest sandbox-env-dash:latest \
-    sandbox-env-comfyip:latest \
+    sandbox-env-comfyip:latest sandbox-env-sandboxns:latest \
     sandbox-mnt-nohost:latest sandbox-mnt-namedvol:latest sandbox-mnt-multimiss:latest \
     sandbox-mnt-nocontainer:latest sandbox-mnt-stalecheck:latest \
     sandbox-cfgtrust-write:latest sandbox-cfgtrust-delete:latest sandbox-cfgtrust-read:latest \
@@ -202,6 +202,33 @@ check_output "SANDBOX_COMFYUI_IP from env: is refused (C1)" \
 check_not_output "...and the CIDR never reaches the container (C1)" \
     "SANDBOX_COMFYUI_IP=1.0.0.0/8" \
     run_cfg_trace "$P_FWENV" run -- true
+
+# C2: the reservation is the whole SANDBOX_* NAMESPACE, not the handful of
+# names that happen to exist today. Every SANDBOX_* variable is a
+# CLI-to-entrypoint control channel (firewall mode, allowed domains, the
+# ComfyUI address, git identity), and the enumerated list this replaced could
+# only ever be as current as the last author who remembered to extend it. This
+# name is deliberately fictional: nothing in the CLI, the entrypoint, or the
+# firewall script reads SANDBOX_FUTURE_THING, so only a prefix rule can refuse
+# it. (The CLI's own legitimate `-e SANDBOX_COMFYUI_IP=…` and `-e SANDBOX_GIT_*`
+# are appended straight to DOCKER_ARGS and never pass through this check —
+# test-comfy.sh and test-git-config.sh pin that they still arrive.)
+P_FWNS="$TMP/env-sandboxns"
+mkdir -p "$P_FWNS"
+cat > "$P_FWNS/sandbox.yaml" <<'YAML'
+name: env-sandboxns
+features: []
+firewall: open
+env:
+  SANDBOX_FUTURE_THING: whatever
+YAML
+docker image tag sandbox-base:latest sandbox-env-sandboxns:latest >/dev/null 2>&1
+check_output "an unknown SANDBOX_* name is refused by the namespace rule (C2)" \
+    "Skipping dangerous env var 'SANDBOX_FUTURE_THING'" \
+    run_cfg "$P_FWNS" run -- true
+check_not_output "...and never reaches the container (C2)" \
+    "SANDBOX_FUTURE_THING=whatever" \
+    run_cfg_trace "$P_FWNS" run -- true
 
 # ── claude.args ──────────────────────────────────────────────────────
 echo "-- claude.args --"

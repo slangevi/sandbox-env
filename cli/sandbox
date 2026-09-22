@@ -171,20 +171,23 @@ validate_env_key() {
 # config) and validate_run_env (per-run CLI input) so the two lists cannot
 # drift apart; see the comments on each caller for what each variable would
 # let an attacker do. A `case` (not a regex) so the trailing `*` prefixes
-# (SANDBOX_GIT_*, ANTHROPIC_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*) work.
+# (SANDBOX_*, ANTHROPIC_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*) work.
 #
-# SANDBOX_COMFYUI_IP belongs here with SANDBOX_FIREWALL and
-# SANDBOX_ALLOWED_DOMAINS: init-firewall.sh's collect_domains reads it
-# unconditionally — the `comfyui` feature is not a precondition — and feeds it
-# straight into the allowed-domains ipset as an IP literal or CIDR. The
-# dotted-quad guard in _build_docker_args only vets the value the CLI itself
-# discovers from `docker inspect`; a value arriving through `env:` would never
-# reach it. `env: {SANDBOX_COMFYUI_IP: 1.0.0.0/8}` in a committed sandbox.yaml
-# is therefore a 16-million-address egress hole that still reads as
+# The whole SANDBOX_* namespace is reserved, not an enumerated handful of
+# names. Every SANDBOX_* variable is a CLI-to-entrypoint control channel:
+# SANDBOX_FIREWALL and SANDBOX_ALLOWED_DOMAINS steer init-firewall.sh,
+# SANDBOX_COMFYUI_IP lands straight in its allowed-domains ipset as an IP
+# literal or CIDR (collect_domains reads it unconditionally — the `comfyui`
+# feature is NOT a precondition), and SANDBOX_GIT_* drives the entrypoint's
+# git config. `env: {SANDBOX_COMFYUI_IP: 1.0.0.0/8}` in a committed
+# sandbox.yaml is a 16-million-address egress hole that still reads as
 # `firewall: strict` with no `allowed_domains` — so it also slips past
 # _spark_guard_firewall and gets the gateway ADMIN key injected alongside it.
-# The CLI's own legitimate `-e SANDBOX_COMFYUI_IP=<ip>` is appended directly
-# to DOCKER_ARGS and never passes through this loop, so it is unaffected.
+# Reserving the PREFIX (as validate_run_env already does for --env) means the
+# next such variable is covered the day it is added, rather than depending on
+# whoever adds it remembering to extend a list. The CLI's own legitimate
+# `-e SANDBOX_COMFYUI_IP=<ip>` / `-e SANDBOX_GIT_*` are appended directly to
+# DOCKER_ARGS and never pass through this loop, so they are unaffected.
 env_key_is_dangerous() {
     local key="$1"
     case "$key" in
@@ -192,8 +195,7 @@ env_key_is_dangerous() {
         NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
         EDITOR|VISUAL|DOCKER_HOST|\
         http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-        SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_COMFYUI_IP|\
-        SANDBOX_GIT_*|ANTHROPIC_*|\
+        SANDBOX_*|ANTHROPIC_*|\
         BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_PROXY_COMMAND|\
         GIT_CONFIG_COUNT|GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*)
             return 0 ;;

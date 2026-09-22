@@ -74,10 +74,13 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 
 - **Security layers in the CLI**: env var blocklist (`env_key_is_dangerous`,
   shared by committed `env:` and per-run `--env`: blocks PATH, NODE_OPTIONS,
-  ANTHROPIC_*, proxy vars, and the three variables that steer
-  `init-firewall.sh` — `SANDBOX_FIREWALL`, `SANDBOX_ALLOWED_DOMAINS` and
-  `SANDBOX_COMFYUI_IP`; add any new firewall-steering variable there, since
-  `collect_domains` reads them with no feature gate), git config key whitelist (only 10 safe keys),
+  ANTHROPIC_*, proxy vars, and the whole reserved `SANDBOX_*` namespace —
+  every one of those is a CLI-to-entrypoint control channel (`SANDBOX_FIREWALL`,
+  `SANDBOX_ALLOWED_DOMAINS` and `SANDBOX_COMFYUI_IP` steer `init-firewall.sh`
+  with no feature gate; `SANDBOX_GIT_*` drives the entrypoint's git config), so
+  a new one needs no new entry here. The CLI's own `-e SANDBOX_*` arguments are
+  appended straight to `DOCKER_ARGS` and never pass through this check),
+  git config key whitelist (only 10 safe keys),
   and a config-trust section holding four validators — `validate_env_key`
   (env names must be identifier-shaped — letters/digits/`_`, plus `.`/`-`
   after the first character — so a YAML key cannot be evaluated as a yq

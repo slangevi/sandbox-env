@@ -629,12 +629,12 @@ check_status "run --env accepted exits 0" 0 \
 # now rejected there first — with the shared list's message, not the
 # prefix loop's "reserved" wording. The rejection itself is unchanged
 # (still refused, still exit 1); only which check catches it first, and the
-# message that names it, changed. The shared list's "ANTHROPIC_*" is a full
-# glob, so EVERY ANTHROPIC_-prefixed key is now caught there — the reserved-
-# prefix loop's own ANTHROPIC_ entry is fully shadowed and can never fire
-# for validate_run_env; SANDBOX_CUSTOM below (outside the shared list, which
-# only names specific SANDBOX_* keys) proves the reserved-prefix loop is
-# still live for the namespaces it does not fully shadow.
+# message that names it, changed. The shared list's "ANTHROPIC_*" and
+# "SANDBOX_*" are full globs, so EVERY key in those namespaces is caught
+# there — the reserved-prefix loop's own ANTHROPIC_ and SANDBOX_ entries are
+# fully shadowed and can never fire for validate_run_env. The CLAUDE_ check
+# below is what proves the reserved-prefix loop is still live for the
+# namespaces the shared list does not cover at all.
 check_output "run --env rejects ANTHROPIC_API_KEY (caught by the shared dangerous-key list)" "not allowed" \
     run_dry run --headless --spark qwen3-coder-next --env ANTHROPIC_API_KEY=x -- "hello"
 
@@ -644,7 +644,12 @@ check_output "run --env rejects the CLAUDE_ prefix" "reserved" \
 check_output "run --env rejects SANDBOX_FIREWALL (caught by the shared dangerous-key list)" "not allowed" \
     run_dry run --headless --spark qwen3-coder-next --env SANDBOX_FIREWALL=open -- "hello"
 
-check_output "run --env rejects the SANDBOX_ prefix generally (reserved-prefix loop)" "reserved" \
+# A SANDBOX_ name that exists nowhere in the CLI: only a namespace rule can
+# refuse it, and since that rule now lives in the shared dangerous-key list it
+# is that list's message that names it. Still refused, still exit 1.
+check_output "run --env rejects an arbitrary SANDBOX_ name (shared dangerous-key list)" "not allowed" \
+    run_dry run --headless --spark qwen3-coder-next --env SANDBOX_CUSTOM=x -- "hello"
+check_status "...and halts rather than passing it through" 1 \
     run_dry run --headless --spark qwen3-coder-next --env SANDBOX_CUSTOM=x -- "hello"
 
 check_output "run --env rejects PYTHONPATH (caught by the shared dangerous-key list)" "not allowed" \
