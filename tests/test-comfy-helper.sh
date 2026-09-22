@@ -116,6 +116,74 @@ check_output "uninstalled model lists what is installed" "v1-5-pruned-emaonly-fp
 check_status "uninstalled model exits 1" 1 \
     "$COMFY" run minimal-txt2img --set prompt=x --set checkpoint=nope.safetensors
 
+echo "-- option and pair parsing --"
+# `${pair%%=*}` and `${pair#*=}` BOTH return the whole string when there is no
+# '=', so `--set prompt` used to set the parameter "prompt" to the literal
+# string "prompt" and report success.
+# Every refusal check below carries an explicit --out under $TMP even though
+# it must never download anything: the default is ./comfy-out, so when one of
+# these guards regresses (exactly the case a neutering check reproduces) the
+# suite writes into the repo working tree instead of its own scratch dir.
+check_output "--set without '=' is refused" "expects key=value" \
+    "$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt
+check_status "...and exits 1" 1 "$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt
+# Against the stub's recorded body: with the guard gone this submitted a graph
+# whose prompt node held the literal string "prompt", which no grep of the
+# command's own output would ever show.
+rm -f "$TMP/last-prompt.json"
+"$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt --no-wait >/dev/null 2>&1
+check_status "...and submits nothing at all" 1 test -e "$TMP/last-prompt.json"
+# An option in final position expanded "$2" under `set -u` into a raw bash
+# abort. A usage message is the point; "unbound variable" is the regression.
+check_output "--set as the final argument gives a usage message" "--set needs a value" \
+    "$COMFY" run minimal-txt2img --out "$TMP/nope" --set
+check_not_output "...not a bash unbound-variable error" "unbound variable" \
+    "$COMFY" run minimal-txt2img --out "$TMP/nope" --set
+check_status "...exiting 1" 1 "$COMFY" run minimal-txt2img --out "$TMP/nope" --set
+check_output "--out as the final argument gives a usage message" "--out needs a value" \
+    "$COMFY" run minimal-txt2img --out
+check_output "txt2img's --prompt is guarded the same way" "--prompt needs a value" \
+    "$COMFY" txt2img --out "$TMP/nope" --prompt
+check_not_output "...with no bash abort either" "unbound variable" \
+    "$COMFY" txt2img --out "$TMP/nope" --prompt
+check_output "fetch's --out is guarded too" "--out needs a value" \
+    "$COMFY" fetch stub-prompt-1 --out
+check_output "upload's --name is guarded too" "--name needs a value" \
+    "$COMFY" upload "$SCRIPT_DIR/tests/fixtures/comfy-stub.py" --name
+check_output "job's --timeout is guarded too" "--timeout needs a value" \
+    "$COMFY" job stub-prompt-1 --timeout
+
+echo "-- integer precision --"
+# jq 1.6 stores numbers as IEEE doubles: 18446744073709551615 becomes
+# 18446744073709552000 on the way into the graph, so ComfyUI rendered a
+# different seed than --json reported.
+rm -f "$TMP/last-prompt.json"
+check_output "a 2^64-1 seed is refused, naming the limit" "9007199254740992" \
+    "$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt=x --set seed=18446744073709551615
+check_status "...and exits 1" 1 \
+    "$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt=x --set seed=18446744073709551615
+# Against the stub's recorded body, not the command's own output: the rounded
+# value only ever appears in what was SUBMITTED, so grepping stdout/stderr for
+# it passed with the whole guard deleted.
+check_status "...and nothing is submitted at all" 1 test -e "$TMP/last-prompt.json"
+"$COMFY" run minimal-txt2img --out "$TMP/nope" --set prompt=x --set seed=9007199254740991 \
+    --no-wait >/dev/null 2>&1
+# Asserted against the RAW submitted body, not jq's reading of it: a rounded
+# value would still compare equal through a second double conversion.
+check_status "2^53-1 is accepted and reaches ComfyUI unrounded" 0 \
+    grep -q '9007199254740991' "$TMP/last-prompt.json"
+check_status "...and no rounded neighbour was submitted" 1 \
+    grep -q '9007199254740992' "$TMP/last-prompt.json"
+
+echo "-- manifest default of false --"
+# jq's `//` treats `false` as absent, so `.default // empty` dropped a bool
+# parameter defaulting to false and the graph kept its own `true`.
+"$COMFY" run bool-default --out "$TMP/nope" --no-wait >/dev/null 2>&1
+check_output "a manifest default of false is applied over a graph true" "^false\$" \
+    jq -r '.prompt["1"].inputs.flag' "$TMP/last-prompt.json"
+check_output "...as a real JSON boolean, not a string" "^boolean\$" \
+    jq -r '.prompt["1"].inputs.flag | type' "$TMP/last-prompt.json"
+
 echo "-- outputs --"
 # Nested two levels under $TMP so the stub's "../../escape.png" traversal
 # target, if it ever escaped, resolves to exactly $TMP/escape.png below —
@@ -197,6 +265,12 @@ check_output "execution error names the node" "KSampler" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out9"
 check_status "execution error exits 3" 3 \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out10"
+# fetch used to read `.[$id].outputs // {}` with no status check at all, so a
+# failed job downloaded nothing and exited 0 — indistinguishable from a
+# successful render that happened to save no files.
+check_output "fetch of a failed job surfaces the execution error" "KSampler" \
+    "$COMFY" fetch stub-prompt-1 --out "$TMP/ferr"
+check_status "...and exits 3, not 0" 3 "$COMFY" fetch stub-prompt-1 --out "$TMP/ferr"
 
 echo "-- injection safety --"
 # Every value crosses into JSON via jq --arg / --argjson, never a shell
@@ -263,6 +337,27 @@ check_output "job --wait non-numeric timeout is refused" "must be a non-negative
 check_status "job --wait non-numeric timeout exits 1, not a hang" 1 \
     timeout 10 "$COMFY" job stub-prompt-1 --wait --timeout abc
 
+echo "-- fetch refuses what it cannot fetch --"
+# A history with no entry for the id iterated zero rows and returned 0: an
+# agent that runs `run --no-wait` and fetches straight afterwards got an empty
+# directory, no output, and every reason to think the render produced no files.
+check_output "fetch of an unknown id says so" "no such job" \
+    "$COMFY" fetch does-not-exist --out "$TMP/fbad"
+check_status "...and exits 1" 1 "$COMFY" fetch does-not-exist --out "$TMP/fbad"
+check_status "...and creates no output directory to be mistaken for a result" 1 \
+    test -e "$TMP/fbad"
+# Still queued: the job is real, just not finished. Different message, and the
+# hint has to be the command that actually waits.
+curl -sS -X POST -d '{"pending":["queued-only"]}' "$COMFYUI_URL/_stub/queue" >/dev/null
+check_output "fetch of a still-queued job points at job --wait" \
+    "comfy job queued-only --wait" "$COMFY" fetch queued-only --out "$TMP/fq"
+check_status "...and exits 1" 1 "$COMFY" fetch queued-only --out "$TMP/fq"
+check_status "...and creates no output directory either" 1 test -e "$TMP/fq"
+curl -sS -X POST -d '{"pending":[]}' "$COMFYUI_URL/_stub/queue" >/dev/null
+check_status "a finished job still fetches" 0 \
+    "$COMFY" fetch stub-prompt-1 --out "$TMP/fok"
+check_output "...and still writes its outputs" "ComfyUI_00001_.png" ls "$TMP/fok"
+
 echo "-- no-wait, then job and fetch --"
 # The submit / collect-later path the spec's command table calls for, and the
 # reason `comfy job` and `comfy fetch` exist as separate commands at all.
@@ -325,6 +420,28 @@ check_output "upload rejects an '=' in a directory component of the path" \
     "the file path must not contain" "$COMFY" upload "$TMP/ev=il/clean.png"
 check_status "...and exits 1 too" 1 "$COMFY" upload "$TMP/ev=il/clean.png"
 check_status "cancel succeeds" 0 "$COMFY" cancel
+
+echo "-- cancel targets the job it was given --"
+# /interrupt takes no id: it stops whatever is executing. Issuing it
+# unconditionally meant `comfy cancel B`, with A on the GPU and B merely
+# queued, killed A and let B start — reported as "interrupted".
+curl -sS -X POST -d '{"running":"running-job","pending":["queued-job"]}' \
+    "$COMFYUI_URL/_stub/queue" >/dev/null
+rm -f "$TMP/interrupts" "$TMP/last-queue-post.json"
+check_output "cancelling a queued job reports a dequeue, not an interrupt" \
+    "removed queued-job from the queue" "$COMFY" cancel queued-job
+check_status "...and the running job was never interrupted" 1 test -e "$TMP/interrupts"
+check_status "...while the queue delete did name the queued job" 0 \
+    jq -e '.delete[0] == "queued-job"' "$TMP/last-queue-post.json"
+rm -f "$TMP/interrupts"
+check_output "cancelling the RUNNING job does interrupt it" \
+    "interrupted running-job" "$COMFY" cancel running-job
+check_status "...and an interrupt really was issued" 0 test -e "$TMP/interrupts"
+rm -f "$TMP/interrupts"
+check_output "cancel with no id interrupts whatever is running" \
+    "interrupted running-job" "$COMFY" cancel
+check_status "...issuing an interrupt" 0 test -e "$TMP/interrupts"
+curl -sS -X POST -d '{"running":"","pending":[]}' "$COMFYUI_URL/_stub/queue" >/dev/null
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

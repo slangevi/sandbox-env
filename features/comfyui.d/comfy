@@ -34,6 +34,15 @@ require_numeric_timeout() {
         || die "--timeout must be a non-negative integer (got '$1')" "$EX_USAGE"
 }
 
+# Every option in the parsers below takes a value. Without this guard, an
+# option in FINAL position expanded "$2" under `set -u` into a raw bash
+# "unbound variable" abort — a stack-trace-shaped message with no usage in it,
+# from a tool an agent drives unattended. Called as a plain function (never in
+# a command substitution) so `die`'s exit ends the script, not a subshell.
+require_arg() {
+    [ -n "${2:-}" ] || die "$1 needs a value" "$EX_USAGE"
+}
+
 # api_get <path> -> body on stdout. Exits 2 on any transport or non-200 result.
 api_get() {
     local path="$1" body code
@@ -108,6 +117,35 @@ $(list_workflow_names | sed 's/^/  /')
 # "6.inputs.text" -> ["6","inputs","text"]
 json_path_array() { printf '%s' "$1" | jq -R 'split(".")'; }
 
+# jq 1.6 stores every number as an IEEE-754 double, so an integer above 2^53
+# is silently ROUNDED on its way into the graph: `jq -n --argjson v
+# 18446744073709551615 'setpath(["a"];$v)'` yields 18446744073709552000.
+# ComfyUI seeds are 64-bit, so `--seed 12345678901234567890` submitted one
+# seed while --json reported another — a reproducibility field that does not
+# reproduce. Refuse the value instead of splicing a literal into the graph
+# text, which would abandon the `jq --argjson` discipline everything else here
+# depends on.
+#
+# Compared as a STRING, never with bash arithmetic: bash integers are 64-bit
+# too, so `[ "$v" -gt … ]` on a 2^64-1 input is exactly the overflow being
+# guarded against. 2^53 = 9007199254740992 is 16 digits, so anything shorter
+# is safe outright and anything longer is refused outright; only a 16-digit
+# value needs comparing, and for equal-length digit strings `\>` is a correct
+# numeric comparison.
+require_exact_integer() {
+    local path="$1" value="$2" mag="${2#-}"
+    # Leading zeros pass set_in_graph's ^-?[0-9]+$ check and would otherwise
+    # inflate the length comparison ("0000000000000000001" is 19 digits).
+    mag="${mag#"${mag%%[!0]*}"}"
+    [ -z "$mag" ] && mag=0
+    if [ "${#mag}" -gt 16 ] || { [ "${#mag}" -eq 16 ] && [ "$mag" \> "9007199254740992" ]; }; then
+        die "parameter at $path is outside +/-9007199254740992 (2^53): '$value'.
+  jq stores numbers as IEEE doubles, so a larger integer would be rounded and
+  a DIFFERENT value would reach ComfyUI than the one reported back. Pick a
+  seed within that range." "$EX_USAGE"
+    fi
+}
+
 # set_in_graph <graph-json> <path> <type> <value> -> new graph on stdout.
 # Types are injected as real JSON types: ComfyUI rejects "42" where it wants 42.
 set_in_graph() {
@@ -117,6 +155,7 @@ set_in_graph() {
         int)
             [[ "$value" =~ ^-?[0-9]+$ ]] \
                 || die "parameter at $path must be an integer (got '$value')" "$EX_USAGE"
+            require_exact_integer "$path" "$value"
             jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
         float)
             [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] \
@@ -294,6 +333,15 @@ run_workflow() {
 
     local pair key value path type folder
     for pair in "$@"; do
+        # Both `${pair%%=*}` and `${pair#*=}` return the WHOLE string when it
+        # contains no '=', so `--set prompt` used to set the parameter named
+        # "prompt" to the literal string "prompt" and report success. There is
+        # no sane reading of a pair with no separator, so refuse it here,
+        # before either expansion can produce that nonsense.
+        case "$pair" in
+            *=*) ;;
+            *) die "--set expects key=value, got '$pair'" "$EX_USAGE" ;;
+        esac
         key="${pair%%=*}"
         value="${pair#*=}"
         path=""; type="string"; folder=""
@@ -344,7 +392,15 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
             fi
             dtype=$(jq -r --arg k "$dkey" '.params[$k].type // "string"' "$mf")
             dfolder=$(jq -r --arg k "$dkey" '.params[$k].folder // empty' "$mf")
-            ddefault=$(jq -r --arg k "$dkey" '.params[$k].default // empty' "$mf")
+            # NOT `.default // empty`: jq's `//` treats `false` as absent, so a
+            # bool parameter whose manifest default is `false` produced an
+            # empty string here, hit the `[ -z "$ddefault" ] && continue`
+            # below, and was never applied — the graph kept whatever it
+            # shipped with (commonly `true`). An explicit null test keeps
+            # `false` (and `0`) while still skipping a missing or null
+            # default, which must NOT become the literal string "null".
+            ddefault=$(jq -r --arg k "$dkey" \
+                '.params[$k] | if .default == null then empty else .default end' "$mf")
             if [ "$dtype" = "model" ] && [ -n "$dfolder" ]; then
                 # A model parameter left at a __PLACEHOLDER__ resolves to the
                 # first installed model, matching verify-e2e.sh's behaviour.
@@ -365,6 +421,9 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
                 ddefault=$(random_seed)
                 seed_used="$ddefault"
             fi
+            # Only an ABSENT default is skipped here: `jq -r` renders a JSON
+            # false as the five-character string "false", which is not empty,
+            # so a `false` default survives this test and reaches the graph.
             [ -z "$ddefault" ] && continue
             graph=$(set_in_graph "$graph" "$dpath" "$dtype" "$ddefault") || exit $?
         done < <(jq -r '.params | keys[]' "$mf")
@@ -427,9 +486,9 @@ cmd_run() {
     local sets=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --set)     sets+=("$2"); shift 2 ;;
-            --out)     out="$2"; shift 2 ;;
-            --timeout) timeout="$2"; shift 2 ;;
+            --set)     require_arg --set "${2:-}";     sets+=("$2"); shift 2 ;;
+            --out)     require_arg --out "${2:-}";     out="$2"; shift 2 ;;
+            --timeout) require_arg --timeout "${2:-}"; timeout="$2"; shift 2 ;;
             --json)    want_json=1; shift ;;
             --no-wait) want_wait=0; shift ;;
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
@@ -503,17 +562,17 @@ generate() {
     local sets=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --prompt)     sets+=("prompt=$2"); shift 2 ;;
-            --negative)   sets+=("negative=$2"); shift 2 ;;
-            --checkpoint) sets+=("checkpoint=$2"); shift 2 ;;
-            --seed)       sets+=("seed=$2"); shift 2 ;;
-            --steps)      sets+=("steps=$2"); shift 2 ;;
-            --width)      sets+=("width=$2"); shift 2 ;;
-            --height)     sets+=("height=$2"); shift 2 ;;
-            --frames)     sets+=("frames=$2"); shift 2 ;;
-            --set)        sets+=("$2"); shift 2 ;;
-            --out)        out="$2"; shift 2 ;;
-            --timeout)    timeout="$2"; shift 2 ;;
+            --prompt)     require_arg --prompt "${2:-}";     sets+=("prompt=$2"); shift 2 ;;
+            --negative)   require_arg --negative "${2:-}";   sets+=("negative=$2"); shift 2 ;;
+            --checkpoint) require_arg --checkpoint "${2:-}"; sets+=("checkpoint=$2"); shift 2 ;;
+            --seed)       require_arg --seed "${2:-}";       sets+=("seed=$2"); shift 2 ;;
+            --steps)      require_arg --steps "${2:-}";      sets+=("steps=$2"); shift 2 ;;
+            --width)      require_arg --width "${2:-}";      sets+=("width=$2"); shift 2 ;;
+            --height)     require_arg --height "${2:-}";     sets+=("height=$2"); shift 2 ;;
+            --frames)     require_arg --frames "${2:-}";     sets+=("frames=$2"); shift 2 ;;
+            --set)        require_arg --set "${2:-}";        sets+=("$2"); shift 2 ;;
+            --out)        require_arg --out "${2:-}";        out="$2"; shift 2 ;;
+            --timeout)    require_arg --timeout "${2:-}";    timeout="$2"; shift 2 ;;
             --json)       want_json=1; shift ;;
             *)            die "unknown option '$1'" "$EX_USAGE" ;;
         esac
@@ -541,7 +600,7 @@ cmd_job() {
         case "$1" in
             --wait)    do_wait=1; shift ;;
             --json)    want_json=1; shift ;;
-            --timeout) timeout="$2"; shift 2 ;;
+            --timeout) require_arg --timeout "${2:-}"; timeout="$2"; shift 2 ;;
             *)         die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
@@ -564,10 +623,44 @@ cmd_fetch() {
     local out="./comfy-out"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --out) out="$2"; shift 2 ;;
+            --out) require_arg --out "${2:-}"; out="$2"; shift 2 ;;
             *)     die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
+    # download_outputs reads `.[$id].outputs // {}`, so a history that does
+    # not contain $pid at all — a typo'd id, or a job still queued — used to
+    # iterate zero rows and return 0, leaving the caller with an empty
+    # directory, no output, and every reason to believe the render finished
+    # with no files. An agent that runs `run --no-wait` and fetches straight
+    # afterwards hits this every time. Decide what actually happened first,
+    # and only download on a real success.
+    local hist status detail queued
+    hist=$(api_get "/history/$pid") || exit $?
+    status=$(jq -r --arg id "$pid" \
+        'if has($id) then (.[$id].status.status_str // "pending") else "missing" end' <<<"$hist")
+    case "$status" in
+        success) ;;
+        error)
+            detail=$(jq -r --arg id "$pid" '
+                .[$id].status.messages[]? | select(.[0] == "execution_error") | .[1]
+                | "  node \(.node_id) (\(.node_type)): \(.exception_message)"' <<<"$hist")
+            die "job $pid failed in ComfyUI:
+$detail" "$EX_EXEC" ;;
+        missing)
+            queued=$(api_get /queue | jq -r --arg id "$pid" \
+                '[(.queue_running[]?[1]), (.queue_pending[]?[1])] | index($id) // empty') || exit $?
+            if [ -n "$queued" ]; then
+                die "job $pid has not finished yet — it is still in the queue.
+  Wait for it with:
+    comfy job $pid --wait" "$EX_USAGE"
+            fi
+            die "no such job '$pid' — ComfyUI's history has no entry for it, and it is not queued.
+  Check the prompt id printed by 'comfy run --no-wait'." "$EX_USAGE" ;;
+        *)
+            die "job $pid has not finished (status: $status).
+  Wait for it with:
+    comfy job $pid --wait" "$EX_USAGE" ;;
+    esac
     download_outputs "$pid" "$out"
 }
 
@@ -579,7 +672,7 @@ cmd_upload() {
     local name; name=$(basename -- "$file")
     while [ $# -gt 0 ]; do
         case "$1" in
-            --name) name="$2"; shift 2 ;;
+            --name) require_arg --name "${2:-}"; name="$2"; shift 2 ;;
             *)      die "unknown option '$1'" "$EX_USAGE" ;;
         esac
     done
@@ -615,20 +708,54 @@ cmd_upload() {
     jq -r '"\(.name) (\(.type)\(if .subfolder == "" then "" else "/" + .subfolder end))"' <<<"$body"
 }
 
-cmd_cancel() {
-    require_url
+# POSTs /interrupt, which stops whatever ComfyUI is executing RIGHT NOW.
+# Split out because the caller below must decide whether that is the job the
+# operator actually named.
+interrupt_running() {
     local body code
     body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
         -X POST "${COMFYUI_URL}/interrupt" 2>/dev/null) \
         || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
     code="${body##*$'\n'}"
     [ "$code" = "200" ] || die "interrupt failed (HTTP $code)" "$EX_EXEC"
-    if [ $# -gt 0 ]; then
-        curl -sS --max-time "$HTTP_TIMEOUT" -X POST -H 'Content-Type: application/json' \
-            --data-binary @- "${COMFYUI_URL}/queue" \
-            <<<"$(jq -n --arg id "$1" '{delete: [$id]}')" >/dev/null 2>&1 || true
+}
+
+cmd_cancel() {
+    require_url
+    local target="${1:-}" running
+    # /interrupt takes no id — it kills the RUNNING job, whichever that is.
+    # Issuing it unconditionally meant `comfy cancel B`, with A rendering and
+    # B merely queued, killed A and left B to start: the exact opposite of
+    # what was asked, reported as "interrupted". So look at the queue first.
+    # ComfyUI's /queue returns queue_running entries shaped
+    # [number, prompt_id, prompt, extra_data, outputs] — hence [0][1].
+    running=$(api_get /queue | jq -r '.queue_running[0][1] // empty') || exit $?
+
+    if [ -z "$target" ]; then
+        # No id: "stop what is running" is unambiguous.
+        interrupt_running
+        if [ -n "$running" ]; then
+            printf 'interrupted %s\n' "$running"
+        else
+            echo "interrupted"
+        fi
+        return 0
     fi
-    echo "interrupted"
+
+    if [ "$target" = "$running" ]; then
+        interrupt_running
+    fi
+    # A queued (not yet running) job is removed by the /queue delete alone;
+    # for the running job this is a harmless no-op that also clears it from
+    # the queue view.
+    curl -sS --max-time "$HTTP_TIMEOUT" -X POST -H 'Content-Type: application/json' \
+        --data-binary @- "${COMFYUI_URL}/queue" \
+        <<<"$(jq -n --arg id "$target" '{delete: [$id]}')" >/dev/null 2>&1 || true
+    if [ "$target" = "$running" ]; then
+        printf 'interrupted %s\n' "$target"
+    else
+        printf 'removed %s from the queue (the running job was left alone)\n' "$target"
+    fi
 }
 
 usage() {
@@ -651,7 +778,9 @@ comfy — generate images and video through a ComfyUI instance
   comfy job ID [--wait] [--json]    status of a queued job
   comfy fetch ID [--out DIR]        download a finished job's outputs
   comfy upload FILE [--name NAME]   upload an input image
-  comfy cancel [ID]                 interrupt the running job
+  comfy cancel [ID]                 with no ID, interrupt whatever is running;
+                                    with one, interrupt it only if it is the
+                                    running job, else just dequeue it
 
 Exit codes: 0 ok, 1 usage, 2 ComfyUI unreachable, 3 execution error, 4 timeout,
 130 interrupted (Ctrl-C) — the job may still be running; see "comfy fetch".

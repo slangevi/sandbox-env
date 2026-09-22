@@ -645,7 +645,9 @@ comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
 comfy job ID [--wait] [--json]    status of a queued job
 comfy fetch ID [--out DIR]        download a finished job's outputs
 comfy upload FILE [--name NAME]   upload an input image
-comfy cancel [ID]                 interrupt the running job
+comfy cancel [ID]                 with no ID, interrupt whatever is running;
+                                  with one, interrupt it only if it is the
+                                  running job, else just dequeue it
 ```
 
 Exit codes: `0` ok, `1` usage/config, `2` ComfyUI unreachable, `3` execution

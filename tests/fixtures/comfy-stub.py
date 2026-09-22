@@ -21,7 +21,18 @@ MODELS = {
 }
 
 # Flipped by /_stub/fail-exec so one test can drive the error path.
-STATE_FLAGS = {"exec_error": False, "pending_forever": False}
+# running/pending are set by /_stub/queue so the cancel and fetch tests can
+# drive a queue that actually holds jobs; "known" is the set of prompt ids
+# /history answers for at all — real ComfyUI returns {} for anything else, and
+# a stub that answered for every id let `comfy fetch <typo>` look like a
+# finished job with no outputs.
+STATE_FLAGS = {
+    "exec_error": False,
+    "pending_forever": False,
+    "running": "",
+    "pending": [],
+    "known": ["stub-prompt-1"],
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,7 +58,15 @@ class Handler(BaseHTTPRequestHandler):
                              "vram_total": 130596048896, "vram_free": 76522124646}],
             })
         if p == "/queue":
-            return self._send(200, {"queue_running": [], "queue_pending": []})
+            # ComfyUI's own entry shape: [number, prompt_id, prompt,
+            # extra_data, outputs_to_execute]. The prompt id at index 1 is
+            # what `comfy cancel` and `comfy fetch` read.
+            running = []
+            if STATE_FLAGS["running"]:
+                running = [[0, STATE_FLAGS["running"], {}, {}, []]]
+            pending = [[i + 1, pid, {}, {}, []]
+                       for i, pid in enumerate(STATE_FLAGS["pending"])]
+            return self._send(200, {"queue_running": running, "queue_pending": pending})
         if p == "/models":
             return self._send(200, list(MODELS))
         if p.startswith("/models/"):
@@ -58,6 +77,10 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/history/"):
             pid = p[len("/history/"):]
             if STATE_FLAGS["pending_forever"]:
+                return self._send(200, {})
+            # Real ComfyUI has no entry for an id it never saw, and answers
+            # with an empty object rather than a 404.
+            if pid not in STATE_FLAGS["known"]:
                 return self._send(200, {})
             if STATE_FLAGS["exec_error"]:
                 return self._send(200, {pid: {"status": {
@@ -123,6 +146,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": {"message": "missing prompt"}})
             return self._send(200, {"prompt_id": "stub-prompt-1", "number": 1})
         if u.path == "/interrupt":
+            # Appended to, never overwritten: the cancel tests assert on
+            # whether an interrupt was issued AT ALL for a given invocation.
+            with open(os.path.join(STATE, "interrupts"), "a") as fh:
+                fh.write("interrupt\n")
+            return self._send(200, {})
+        if u.path == "/queue":
+            with open(os.path.join(STATE, "last-queue-post.json"), "wb") as fh:
+                fh.write(raw)
             return self._send(200, {})
         if u.path == "/upload/image":
             return self._send(200, {"name": "uploaded.png", "subfolder": "", "type": "input"})
@@ -131,6 +162,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if u.path == "/_stub/pending":
             STATE_FLAGS["pending_forever"] = True
+            return self._send(200, {"ok": True})
+        if u.path == "/_stub/queue":
+            # {"running": "<id>", "pending": ["<id>", ...]} — either key may
+            # be omitted; an empty string/list clears it.
+            try:
+                body = json.loads(raw or b"{}")
+            except ValueError:
+                return self._send(400, {"error": "invalid json"})
+            if "running" in body:
+                STATE_FLAGS["running"] = body["running"]
+            if "pending" in body:
+                STATE_FLAGS["pending"] = list(body["pending"])
             return self._send(200, {"ok": True})
         self._send(404, {"error": "not found"})
 
