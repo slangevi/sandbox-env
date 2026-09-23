@@ -637,6 +637,10 @@ comfy txt2img --prompt TEXT       generate an image
     [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
     [--width N] [--height N] [--out DIR] [--json]
 comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+    [--duration S] [--fps N] [--frames N]   whichever the workflow exposes
+comfy edit --image FILE --prompt TEXT       edit an image (workflow tagged "edit")
+                                  FILE: a local file (uploaded for you) or a
+                                  name already in ComfyUI's input directory
 comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
     [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
     [--no-wait]                   submit only; print the prompt id and return
@@ -696,8 +700,10 @@ reach it; nothing further to configure for that.
 workflow from the shared directory or a path in the workspace. A workflow with
 a sibling `<name>.params.json` manifest gets friendly parameter names
 (`--set prompt="..."`); without one, raw node paths still work
-(`--set 3.inputs.seed=42`). `comfy txt2img` and `comfy video` pick the
-workflow tagged `txt2img` or `video`.
+(`--set 3.inputs.seed=42`). `comfy txt2img`, `comfy video` and `comfy edit`
+pick the workflow tagged `txt2img`, `video` or `edit`. `comfy edit --image`
+accepts a local file — it is uploaded to ComfyUI's input directory first and
+the stored name is what the graph sees — or a name already uploaded.
 
 **Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
 id and returns immediately — nothing is polled and nothing is downloaded. Pick
