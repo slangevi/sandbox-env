@@ -1,0 +1,10 @@
+{
+  "description": "Fixture: single-image edit. `image` is a filename in ComfyUI's input directory.",
+  "tags": ["edit", "default"],
+  "params": {
+    "image":      { "path": "10.inputs.image",      "type": "string", "required": true },
+    "prompt":     { "path": "6.inputs.text",        "type": "string", "required": true },
+    "seed":       { "path": "3.inputs.seed",        "type": "int",    "default": "random" },
+    "checkpoint": { "path": "4.inputs.ckpt_name",   "type": "model",  "folder": "checkpoints" }
+  }
+}

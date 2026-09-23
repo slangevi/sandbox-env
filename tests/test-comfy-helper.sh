@@ -319,9 +319,13 @@ check_status "txt2img non-numeric timeout exits 1, not a hang" 1 \
     "$COMFY" txt2img --prompt p --timeout abc --out "$TMP/tbad"
 
 echo "-- video with no tagged workflow --"
+# A workflows dir holding only the txt2img fixture, so the missing-tag path
+# stays testable now that a video fixture exists in the main fixtures dir.
+mkdir -p "$TMP/wf-novideo" && cp "$COMFY_WORKFLOWS"/minimal-txt2img.* "$TMP/wf-novideo/"
 check_output "video explains the missing tag" "no workflow tagged 'video'" \
-    "$COMFY" video --prompt p --out "$TMP/v1"
-check_status "video exits 1 when untagged" 1 "$COMFY" video --prompt p --out "$TMP/v1"
+    env COMFY_WORKFLOWS="$TMP/wf-novideo" "$COMFY" video --prompt p --out "$TMP/v1"
+check_status "video exits 1 when untagged" 1 \
+    env COMFY_WORKFLOWS="$TMP/wf-novideo" "$COMFY" video --prompt p --out "$TMP/v1"
 
 echo "-- job and fetch --"
 check_output "job reports status"   "success" "$COMFY" job stub-prompt-1
@@ -442,6 +446,38 @@ check_output "cancel with no id interrupts whatever is running" \
     "interrupted running-job" "$COMFY" cancel
 check_status "...issuing an interrupt" 0 test -e "$TMP/interrupts"
 curl -sS -X POST -d '{"running":"","pending":[]}' "$COMFYUI_URL/_stub/queue" >/dev/null
+
+echo "-- edit --"
+"$COMFY" edit --image already-uploaded.png --prompt "make it a pear" --out "$TMP/e1" >/dev/null 2>&1
+check_output "edit passes an uploaded name through to the LoadImage node" "already-uploaded.png" \
+    jq -r '.prompt["10"].inputs.image' "$TMP/last-prompt.json"
+check_output "edit sets the prompt node" "make it a pear" \
+    jq -r '.prompt["6"].inputs.text' "$TMP/last-prompt.json"
+echo "fake-png" > "$TMP/local-photo.png"
+rm -f "$TMP/last-upload.raw"
+"$COMFY" edit --image "$TMP/local-photo.png" --prompt p --out "$TMP/e2" >/dev/null 2>&1
+check_output "edit auto-uploads a local file and uses the STORED name" "uploaded.png" \
+    jq -r '.prompt["10"].inputs.image' "$TMP/last-prompt.json"
+check_output "...and the upload carried the local file's name" 'filename="local-photo.png"' \
+    cat "$TMP/last-upload.raw"
+check_status "edit succeeds" 0 "$COMFY" edit --image "$TMP/local-photo.png" --prompt p --out "$TMP/e3"
+check_output "edit requires --image" "'image' is required" "$COMFY" edit --prompt p --out "$TMP/e4"
+check_status "edit without --image exits 1" 1 "$COMFY" edit --prompt p --out "$TMP/e4"
+check_output "edit's --image is guarded" "--image needs a value" "$COMFY" edit --prompt p --image
+check_output "edit explains a missing tag" "no workflow tagged 'edit'" \
+    env COMFY_WORKFLOWS="$TMP/wf-novideo" "$COMFY" edit --image x.png --prompt p --out "$TMP/e5"
+
+echo "-- video flags --"
+"$COMFY" video --prompt "waves" --duration 3 --fps 12 --frames 37 --out "$TMP/vf1" >/dev/null 2>&1
+check_output "video --duration reaches its param" "^3$" jq -r '.prompt["13"].inputs.value' "$TMP/last-prompt.json"
+check_output "video --fps reaches its param" "^12$" jq -r '.prompt["12"].inputs.value' "$TMP/last-prompt.json"
+check_output "video --frames reaches its param" "^37$" jq -r '.prompt["11"].inputs.length' "$TMP/last-prompt.json"
+check_output "video params are JSON numbers" "number" jq -r '.prompt["13"].inputs.value | type' "$TMP/last-prompt.json"
+check_status "video succeeds" 0 "$COMFY" video --prompt p --out "$TMP/vf2"
+check_output "video --duration is guarded" "--duration needs a value" "$COMFY" video --prompt p --duration
+check_output "video --fps is guarded" "--fps needs a value" "$COMFY" video --prompt p --fps
+check_output "txt2img rejects --duration on a workflow without it" "unknown parameter 'duration'" \
+    "$COMFY" txt2img --prompt p --duration 3 --out "$TMP/vf3"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

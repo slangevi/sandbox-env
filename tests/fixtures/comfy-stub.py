@@ -156,6 +156,10 @@ class Handler(BaseHTTPRequestHandler):
                 fh.write(raw)
             return self._send(200, {})
         if u.path == "/upload/image":
+            # Record the raw multipart body so tests can assert which local
+            # file the helper actually uploaded (its filename= field).
+            with open(os.path.join(STATE, "last-upload.raw"), "wb") as fh:
+                fh.write(raw)
             return self._send(200, {"name": "uploaded.png", "subfolder": "", "type": "input"})
         if u.path == "/_stub/fail-exec":
             STATE_FLAGS["exec_error"] = True

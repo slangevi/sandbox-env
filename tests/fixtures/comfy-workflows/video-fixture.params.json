@@ -1,0 +1,12 @@
+{
+  "description": "Fixture: text-to-video with duration/fps primitives and a directly settable frame count.",
+  "tags": ["video", "default"],
+  "params": {
+    "prompt":     { "path": "6.inputs.text",        "type": "string", "required": true },
+    "seed":       { "path": "3.inputs.seed",        "type": "int",    "default": "random" },
+    "duration":   { "path": "13.inputs.value",      "type": "int",    "default": 5 },
+    "fps":        { "path": "12.inputs.value",      "type": "int",    "default": 24 },
+    "frames":     { "path": "11.inputs.length",     "type": "int" },
+    "checkpoint": { "path": "4.inputs.ckpt_name",   "type": "model",  "folder": "checkpoints" }
+  }
+}

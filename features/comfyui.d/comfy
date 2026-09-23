@@ -570,6 +570,23 @@ generate() {
             --width)      require_arg --width "${2:-}";      sets+=("width=$2"); shift 2 ;;
             --height)     require_arg --height "${2:-}";     sets+=("height=$2"); shift 2 ;;
             --frames)     require_arg --frames "${2:-}";     sets+=("frames=$2"); shift 2 ;;
+            --duration)   require_arg --duration "${2:-}";   sets+=("duration=$2"); shift 2 ;;
+            --fps)        require_arg --fps "${2:-}";        sets+=("fps=$2"); shift 2 ;;
+            --image)
+                # A path that exists locally is uploaded first and the name
+                # ComfyUI stored it under is what reaches the graph; anything
+                # else is taken as a name already in ComfyUI's input directory.
+                require_arg --image "${2:-}"
+                if [ -f "$2" ]; then
+                    local up_body up_name
+                    up_body=$(upload_image "$2" "$(basename -- "$2")") || exit $?
+                    up_name=$(jq -r '.name' <<<"$up_body")
+                    printf 'comfy: uploaded %s as %s\n' "$2" "$up_name" >&2
+                    sets+=("image=$up_name")
+                else
+                    sets+=("image=$2")
+                fi
+                shift 2 ;;
             --set)        require_arg --set "${2:-}";        sets+=("$2"); shift 2 ;;
             --out)        require_arg --out "${2:-}";        out="$2"; shift 2 ;;
             --timeout)    require_arg --timeout "${2:-}";    timeout="$2"; shift 2 ;;
@@ -588,6 +605,7 @@ generate() {
 
 cmd_txt2img() { require_url; generate txt2img "$@"; }
 cmd_video()   { require_url; generate video "$@"; }
+cmd_edit()    { require_url; generate edit "$@"; }
 
 # ── job control ──────────────────────────────────────────────────────
 
@@ -664,18 +682,11 @@ $detail" "$EX_EXEC" ;;
     download_outputs "$pid" "$out"
 }
 
-cmd_upload() {
-    require_url
-    [ $# -gt 0 ] || die "usage: comfy upload <file> [--name NAME]" "$EX_USAGE"
-    local file="$1"; shift
+# upload_image <file> <name> -> the /upload/image JSON body on stdout.
+# Shared by `comfy upload` and `comfy edit --image <local file>`.
+upload_image() {
+    local file="$1" name="$2"
     [ -f "$file" ] || die "no such file: $file" "$EX_USAGE"
-    local name; name=$(basename -- "$file")
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --name) require_arg --name "${2:-}"; name="$2"; shift 2 ;;
-            *)      die "unknown option '$1'" "$EX_USAGE" ;;
-        esac
-    done
     # Both halves of the curl -F field ("image=@${file};filename=${name}") are
     # agent-controlled input, and a ';', '=', '"' or newline in EITHER alters
     # curl's own multipart-field parsing, not just the remote filename. This is
@@ -705,6 +716,22 @@ cmd_upload() {
     code="${body##*$'\n'}"
     body="${body%$'\n'*}"
     [ "$code" = "200" ] || die "upload failed (HTTP $code): $body" "$EX_EXEC"
+    printf '%s' "$body"
+}
+
+cmd_upload() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy upload <file> [--name NAME]" "$EX_USAGE"
+    local file="$1"; shift
+    local name; name=$(basename -- "$file")
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) require_arg --name "${2:-}"; name="$2"; shift 2 ;;
+            *)      die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    local body
+    body=$(upload_image "$file" "$name") || exit $?
     jq -r '"\(.name) (\(.type)\(if .subfolder == "" then "" else "/" + .subfolder end))"' <<<"$body"
 }
 
@@ -770,6 +797,10 @@ comfy — generate images and video through a ComfyUI instance
       [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
       [--width N] [--height N] [--out DIR] [--json]
   comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+      [--duration S] [--fps N] [--frames N]   whichever the workflow exposes
+  comfy edit --image FILE --prompt TEXT       edit an image (workflow tagged "edit")
+                                    FILE: a local file (uploaded for you) or a
+                                    name already in ComfyUI's input directory
   comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
       [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
       [--no-wait]                   submit only; print the prompt id and return
@@ -798,6 +829,7 @@ case "${1:-help}" in
     run)            shift; cmd_run "$@" ;;
     txt2img)        shift; cmd_txt2img "$@" ;;
     video)          shift; cmd_video "$@" ;;
+    edit)           shift; cmd_edit "$@" ;;
     job)            shift; cmd_job "$@" ;;
     fetch)          shift; cmd_fetch "$@" ;;
     upload)         shift; cmd_upload "$@" ;;
