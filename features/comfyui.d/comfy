@@ -1,0 +1,807 @@
+#!/bin/bash
+# comfy — drive a ComfyUI instance from inside a sandbox.
+#
+# Deliberately NOT `set -e`: this script owns its exit codes (see EX_* below)
+# and an inherited errexit would turn a handled HTTP failure into a bare
+# non-zero exit with no message.
+set -uo pipefail
+
+EX_USAGE=1
+EX_UNREACHABLE=2
+EX_EXEC=3
+EX_TIMEOUT=4
+
+COMFYUI_URL="${COMFYUI_URL:-}"
+COMFY_WORKFLOWS="${COMFY_WORKFLOWS:-/opt/comfy-workflows}"
+HTTP_TIMEOUT="${COMFY_HTTP_TIMEOUT:-60}"
+
+die() { printf 'comfy: %s\n' "$1" >&2; exit "${2:-$EX_USAGE}"; }
+
+require_url() {
+    [ -n "$COMFYUI_URL" ] && return 0
+    die "not wired into this sandbox — COMFYUI_URL is unset.
+  Add 'comfyui' to features: in sandbox.yaml, make sure the ComfyUI container
+  is running, then restart the sandbox." "$EX_USAGE"
+}
+
+# A non-numeric timeout makes wait_for_job's `[ "$waited" -ge "$timeout" ]`
+# return 2 every iteration, so the poll loop never terminates. For a tool an
+# agent drives unattended, a hang is worse than any error. Called from every
+# site that accepts --timeout/COMFY_JOB_TIMEOUT before it reaches wait_for_job:
+# cmd_run, generate, cmd_job.
+require_numeric_timeout() {
+    [[ "$1" =~ ^[0-9]+$ ]] \
+        || die "--timeout must be a non-negative integer (got '$1')" "$EX_USAGE"
+}
+
+# Every option in the parsers below takes a value. Without this guard, an
+# option in FINAL position expanded "$2" under `set -u` into a raw bash
+# "unbound variable" abort — a stack-trace-shaped message with no usage in it,
+# from a tool an agent drives unattended. Called as a plain function (never in
+# a command substitution) so `die`'s exit ends the script, not a subshell.
+require_arg() {
+    [ -n "${2:-}" ] || die "$1 needs a value" "$EX_USAGE"
+}
+
+# api_get <path> -> body on stdout. Exits 2 on any transport or non-200 result.
+api_get() {
+    local path="$1" body code
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        -w '\n%{http_code}' "${COMFYUI_URL}${path}" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    [ "$code" = "200" ] || die "ComfyUI returned HTTP $code for $path" "$EX_UNREACHABLE"
+    printf '%s' "$body"
+}
+
+# ── workflows ────────────────────────────────────────────────────────
+
+list_workflow_names() {
+    local f
+    [ -d "$COMFY_WORKFLOWS" ] || return 0
+    for f in "$COMFY_WORKFLOWS"/*.json; do
+        [ -f "$f" ] || continue
+        case "$f" in *.params.json) continue ;; esac
+        basename "$f" .json
+    done
+}
+
+resolve_workflow() {
+    local ref="$1"
+    if [ -f "$ref" ]; then printf '%s' "$ref"; return 0; fi
+    if [ -f "$COMFY_WORKFLOWS/$ref" ]; then printf '%s' "$COMFY_WORKFLOWS/$ref"; return 0; fi
+    if [ -f "$COMFY_WORKFLOWS/$ref.json" ]; then printf '%s' "$COMFY_WORKFLOWS/$ref.json"; return 0; fi
+    die "no workflow '$ref'. Available in $COMFY_WORKFLOWS:
+$(list_workflow_names | sed 's/^/  /')" "$EX_USAGE"
+}
+
+manifest_path() { printf '%s' "${1%.json}.params.json"; }
+
+# The single most common mistake is exporting from the ComfyUI menu, which
+# produces a UI graph the /prompt endpoint cannot execute. Name it exactly.
+assert_api_format() {
+    local wf="$1"
+    jq -e . "$wf" >/dev/null 2>&1 || die "$wf is not valid JSON" "$EX_USAGE"
+    if jq -e 'type == "object" and has("nodes") and has("links")' "$wf" >/dev/null 2>&1; then
+        die "$wf looks like a ComfyUI UI export, not API format.
+  In ComfyUI: Workflow -> Export (API). API format is a flat map of
+  node id -> {class_type, inputs}." "$EX_USAGE"
+    fi
+    jq -e 'type == "object" and (length > 0)
+           and all(.[]; type == "object" and has("class_type"))' "$wf" >/dev/null 2>&1 \
+        || die "$wf is not a ComfyUI API-format workflow (expected node id -> {class_type, inputs})" "$EX_USAGE"
+}
+
+workflow_for_tag() {
+    local tag="$1" name wf mf best=""
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        wf="$COMFY_WORKFLOWS/$name.json"
+        mf=$(manifest_path "$wf")
+        [ -f "$mf" ] || continue
+        jq -e --arg t "$tag" '(.tags // []) | index($t)' "$mf" >/dev/null 2>&1 || continue
+        if jq -e '(.tags // []) | index("default")' "$mf" >/dev/null 2>&1; then
+            printf '%s' "$wf"; return 0
+        fi
+        [ -z "$best" ] && best="$wf"
+    done < <(list_workflow_names)
+    [ -n "$best" ] || die "no workflow tagged '$tag' in $COMFY_WORKFLOWS. Available:
+$(list_workflow_names | sed 's/^/  /')
+  Tag one by adding \"tags\": [\"$tag\"] to its .params.json manifest." "$EX_USAGE"
+    printf '%s' "$best"
+}
+
+# ── parameter injection ──────────────────────────────────────────────
+
+# "6.inputs.text" -> ["6","inputs","text"]
+json_path_array() { printf '%s' "$1" | jq -R 'split(".")'; }
+
+# jq 1.6 stores every number as an IEEE-754 double, so an integer above 2^53
+# is silently ROUNDED on its way into the graph: `jq -n --argjson v
+# 18446744073709551615 'setpath(["a"];$v)'` yields 18446744073709552000.
+# ComfyUI seeds are 64-bit, so `--seed 12345678901234567890` submitted one
+# seed while --json reported another — a reproducibility field that does not
+# reproduce. Refuse the value instead of splicing a literal into the graph
+# text, which would abandon the `jq --argjson` discipline everything else here
+# depends on.
+#
+# Compared as a STRING, never with bash arithmetic: bash integers are 64-bit
+# too, so `[ "$v" -gt … ]` on a 2^64-1 input is exactly the overflow being
+# guarded against. 2^53 = 9007199254740992 is 16 digits, so anything shorter
+# is safe outright and anything longer is refused outright; only a 16-digit
+# value needs comparing, and for equal-length digit strings `\>` is a correct
+# numeric comparison.
+require_exact_integer() {
+    local path="$1" value="$2" mag="${2#-}"
+    # Leading zeros pass set_in_graph's ^-?[0-9]+$ check and would otherwise
+    # inflate the length comparison ("0000000000000000001" is 19 digits).
+    mag="${mag#"${mag%%[!0]*}"}"
+    [ -z "$mag" ] && mag=0
+    if [ "${#mag}" -gt 16 ] || { [ "${#mag}" -eq 16 ] && [ "$mag" \> "9007199254740992" ]; }; then
+        die "parameter at $path is outside +/-9007199254740992 (2^53): '$value'.
+  jq stores numbers as IEEE doubles, so a larger integer would be rounded and
+  a DIFFERENT value would reach ComfyUI than the one reported back. Pick a
+  seed within that range." "$EX_USAGE"
+    fi
+}
+
+# set_in_graph <graph-json> <path> <type> <value> -> new graph on stdout.
+# Types are injected as real JSON types: ComfyUI rejects "42" where it wants 42.
+set_in_graph() {
+    local graph="$1" path="$2" type="$3" value="$4" p
+    p=$(json_path_array "$path")
+    case "$type" in
+        int)
+            [[ "$value" =~ ^-?[0-9]+$ ]] \
+                || die "parameter at $path must be an integer (got '$value')" "$EX_USAGE"
+            require_exact_integer "$path" "$value"
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        float)
+            [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] \
+                || die "parameter at $path must be a number (got '$value')" "$EX_USAGE"
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        bool)
+            case "$value" in
+                true|false) ;;
+                *) die "parameter at $path must be true or false (got '$value')" "$EX_USAGE" ;;
+            esac
+            jq --argjson p "$p" --argjson v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+        *)
+            jq --argjson p "$p" --arg v "$value" 'setpath($p; $v)' <<<"$graph" ;;
+    esac
+}
+
+validate_model_value() {
+    local folder="$1" value="$2" names
+    names=$(api_get "/models/$folder" | jq -r '.[]?') || exit $?
+    grep -Fxq -- "$value" <<<"$names" && return 0
+    die "model '$value' is not installed in $folder. Available:
+$(sed 's/^/  /' <<<"$names")" "$EX_USAGE"
+}
+
+first_model() { api_get "/models/$1" | jq -r '.[0] // empty'; }
+
+random_seed() {
+    local hex
+    hex=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%d' $(( 0x$hex & 0x7fffffff ))
+}
+
+# ── job lifecycle ────────────────────────────────────────────────────
+
+submit_graph() {
+    local graph="$1" payload body code msg
+    payload=$(jq -n --argjson p "$graph" --arg cid "sandbox-comfy" \
+        '{prompt: $p, client_id: $cid}')
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
+        -X POST -H 'Content-Type: application/json' --data-binary @- \
+        "${COMFYUI_URL}/prompt" <<<"$payload" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    if [ "$code" != "200" ]; then
+        msg=$(jq -r '[(.error.message // .error // "unknown error"),
+                      ((.node_errors // {}) | to_entries[]
+                       | "  node \(.key): \([.value.errors[]?.message] | join("; "))")]
+                     | join("\n")' <<<"$body" 2>/dev/null) || msg="$body"
+        die "ComfyUI rejected the workflow (HTTP $code):
+$msg" "$EX_EXEC"
+    fi
+    jq -r '.prompt_id' <<<"$body"
+}
+
+wait_for_job() {
+    local pid="$1" timeout="$2" waited=0 hist status detail
+    while :; do
+        hist=$(api_get "/history/$pid") || exit $?
+        status=$(jq -r --arg id "$pid" '.[$id].status.status_str // "pending"' <<<"$hist")
+        case "$status" in
+            success) return 0 ;;
+            error)
+                detail=$(jq -r --arg id "$pid" '
+                    .[$id].status.messages[]? | select(.[0] == "execution_error") | .[1]
+                    | "  node \(.node_id) (\(.node_type)): \(.exception_message)"' <<<"$hist")
+                die "ComfyUI execution failed:
+$detail" "$EX_EXEC" ;;
+        esac
+        if [ "$waited" -ge "$timeout" ]; then
+            die "timed out after ${timeout}s waiting for $pid.
+  The job may still be running on the GPU. Retrieve it with:
+    comfy fetch $pid" "$EX_TIMEOUT"
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
+# fetch_view <dest> <filename> <subfolder> <type> — one attempt at /view.
+# Checks the HTTP status explicitly (like api_get/submit_graph do) rather
+# than trusting curl's exit code: without -f, curl calls a non-2xx response
+# with a body — an error page, say — a success, and would happily leave
+# that body sitting at $dest looking like a downloaded file.
+fetch_view() {
+    local code
+    code=$(curl -sS -G --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" -o "$1" \
+        -w '%{http_code}' \
+        --data-urlencode "filename=$2" \
+        --data-urlencode "subfolder=$3" \
+        --data-urlencode "type=$4" \
+        "${COMFYUI_URL}/view") || return 1
+    [ "$code" = "200" ]
+}
+
+# Writes every output of a finished job into <outdir>, printing each path.
+download_outputs() {
+    local pid="$1" out="$2" hist row fn sub typ safe dest n
+    mkdir -p "$out" || die "cannot create output directory $out" "$EX_USAGE"
+    hist=$(api_get "/history/$pid") || exit $?
+    # One compact JSON object per line, read whole (IFS= disables all
+    # splitting) and picked apart with jq afterward — NOT @tsv read via
+    # `IFS=$'\t' read -r a b c`: bash's `read` treats tab as IFS
+    # *whitespace*, so runs of it collapse and an empty middle field (the
+    # overwhelmingly common case: subfolder is "" for a top-level output)
+    # is silently dropped, shifting every later field left. That bug used to
+    # live here and made every default-subfolder download fetch the wrong
+    # (filename, type) pair, which ComfyUI's /view then 400s on.
+    while IFS= read -r row; do
+        [ -z "$row" ] && continue
+        fn=$(jq -r '.filename' <<<"$row")
+        sub=$(jq -r '.subfolder' <<<"$row")
+        typ=$(jq -r '.type' <<<"$row")
+        [ -z "$fn" ] && continue
+        # Filenames come from ComfyUI — i.e. off the network. Reduce to a
+        # basename BEFORE the value is ever used as a local path.
+        safe=$(basename -- "$fn")
+        case "$safe" in ""|.|..|/) continue ;; esac
+        dest="$out/$safe"
+        n=1
+        while [ -e "$dest" ]; do
+            dest="$out/${safe%.*}-${n}.${safe##*.}"
+            n=$((n + 1))
+        done
+        fetch_view "$dest" "$fn" "$sub" "$typ" || {
+            rm -f "$dest"
+            die "failed downloading $safe from $COMFYUI_URL" "$EX_UNREACHABLE"
+        }
+        if [ ! -s "$dest" ]; then
+            rm -f "$dest"
+            die "downloaded $safe from $COMFYUI_URL but it is empty" "$EX_UNREACHABLE"
+        fi
+        printf '%s\n' "$dest"
+    done < <(jq -c --arg id "$pid" '
+        .[$id].outputs // {} | to_entries[] | .value | to_entries[] | .value
+        | if type == "array" then .[] else empty end
+        # .filename must actually be a string — a null (or missing, which
+        # also types as null) used to render as an empty @tsv field and get
+        # skipped by the caller; skip it here explicitly instead of handing
+        # the literal string "null" to fetch_view as a filename.
+        | select(type == "object" and (.filename | type == "string"))
+        | {filename: .filename, subfolder: (.subfolder // ""), type: (.type // "output")}' <<<"$hist")
+}
+
+# ── run ──────────────────────────────────────────────────────────────
+
+# find_supplied <dkey> <dpath> <pair>... -> prints the matching pair's
+# value and returns 0 if <dkey> (a manifest parameter name) or <dpath>
+# (the raw node path it maps to) was supplied via --set. Matched by an
+# exact key comparison against each pair's own key — never a substring
+# of the joined argv — so a value containing "=" or another parameter's
+# name can't forge a match. Returns 1 if neither was supplied.
+find_supplied() {
+    local dkey="$1" dpath="$2" p; shift 2
+    for p in "$@"; do
+        case "${p%%=*}" in
+            "$dkey"|"$dpath") printf '%s' "${p#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# run_workflow <workflow> <outdir> <timeout> <json:0|1> <wait:0|1> [key=value ...]
+# With <wait> 0 the job is submitted and its prompt id reported, and neither
+# wait_for_job nor download_outputs runs — `comfy job` and `comfy fetch` pick
+# it up later. That is the point of the flag: a long video render outlives any
+# reasonable --timeout, and blocking on it ties up the agent for nothing.
+run_workflow() {
+    local wf="$1" out="$2" timeout="$3" want_json="$4" want_wait="$5"; shift 5
+    local mf graph pid seed_used="" files elapsed start seed_json
+
+    assert_api_format "$wf"
+    mf=$(manifest_path "$wf")
+    graph=$(cat "$wf")
+
+    local pair key value path type folder
+    for pair in "$@"; do
+        # Both `${pair%%=*}` and `${pair#*=}` return the WHOLE string when it
+        # contains no '=', so `--set prompt` used to set the parameter named
+        # "prompt" to the literal string "prompt" and report success. There is
+        # no sane reading of a pair with no separator, so refuse it here,
+        # before either expansion can produce that nonsense.
+        case "$pair" in
+            *=*) ;;
+            *) die "--set expects key=value, got '$pair'" "$EX_USAGE" ;;
+        esac
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        path=""; type="string"; folder=""
+        if [ -f "$mf" ]; then
+            path=$(jq -r --arg k "$key" '.params[$k].path // empty' "$mf")
+            if [ -n "$path" ]; then
+                type=$(jq -r --arg k "$key" '.params[$k].type // "string"' "$mf")
+                folder=$(jq -r --arg k "$key" '.params[$k].folder // empty' "$mf")
+            fi
+        fi
+        if [ -z "$path" ]; then
+            # Not a manifest name: accept a raw node path, inferring the type
+            # from the value's shape.
+            if [[ "$key" =~ ^[A-Za-z0-9_-]+\.inputs\.[A-Za-z0-9_]+$ ]]; then
+                path="$key"
+                if   [[ "$value" =~ ^-?[0-9]+$ ]]; then type="int"
+                elif [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]]; then type="float"
+                elif [ "$value" = "true" ] || [ "$value" = "false" ]; then type="bool"
+                else type="string"; fi
+            else
+                die "unknown parameter '$key'. This workflow accepts:
+$( [ -f "$mf" ] && jq -r '.params | keys[]' "$mf" | sed 's/^/  /' )
+  ...or a raw node path such as 3.inputs.seed. Node ids here:
+$(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
+            fi
+        fi
+        if [ "$type" = "model" ] && [ -n "$folder" ]; then
+            validate_model_value "$folder" "$value"
+            type="string"
+        fi
+        graph=$(set_in_graph "$graph" "$path" "$type" "$value") || exit $?
+    done
+
+    # Manifest defaults for anything not overridden above.
+    if [ -f "$mf" ]; then
+        local dkey dpath dtype ddefault dfolder current supplied
+        while IFS= read -r dkey; do
+            [ -z "$dkey" ] && continue
+            dpath=$(jq -r --arg k "$dkey" '.params[$k].path' "$mf")
+            # Skip if already supplied, whether by manifest name (prompt=...)
+            # or by the raw node path it maps to (6.inputs.text=...). Matched
+            # by an exact key comparison (never a substring of the joined
+            # argv), so a value containing "=" or another param's name can't
+            # forge a match.
+            if supplied=$(find_supplied "$dkey" "$dpath" "$@"); then
+                [ "$dkey" = "seed" ] && seed_used="$supplied"
+                continue
+            fi
+            dtype=$(jq -r --arg k "$dkey" '.params[$k].type // "string"' "$mf")
+            dfolder=$(jq -r --arg k "$dkey" '.params[$k].folder // empty' "$mf")
+            # NOT `.default // empty`: jq's `//` treats `false` as absent, so a
+            # bool parameter whose manifest default is `false` produced an
+            # empty string here, hit the `[ -z "$ddefault" ] && continue`
+            # below, and was never applied — the graph kept whatever it
+            # shipped with (commonly `true`). An explicit null test keeps
+            # `false` (and `0`) while still skipping a missing or null
+            # default, which must NOT become the literal string "null".
+            ddefault=$(jq -r --arg k "$dkey" \
+                '.params[$k] | if .default == null then empty else .default end' "$mf")
+            if [ "$dtype" = "model" ] && [ -n "$dfolder" ]; then
+                # A model parameter left at a __PLACEHOLDER__ resolves to the
+                # first installed model, matching verify-e2e.sh's behaviour.
+                current=$(jq -r --argjson p "$(json_path_array "$dpath")" \
+                    'getpath($p) // ""' <<<"$graph")
+                case "$current" in
+                    ""|__*__)
+                        ddefault=$(first_model "$dfolder") || exit $?
+                        [ -n "$ddefault" ] \
+                            || die "no models installed in $dfolder — nothing to generate with" "$EX_USAGE"
+                        printf 'comfy: using %s from %s\n' "$ddefault" "$dfolder" >&2
+                        graph=$(set_in_graph "$graph" "$dpath" "string" "$ddefault") || exit $?
+                        ;;
+                esac
+                continue
+            fi
+            if [ "$ddefault" = "random" ] && [ "$dtype" = "int" ]; then
+                ddefault=$(random_seed)
+                seed_used="$ddefault"
+            fi
+            # Only an ABSENT default is skipped here: `jq -r` renders a JSON
+            # false as the five-character string "false", which is not empty,
+            # so a `false` default survives this test and reaches the graph.
+            [ -z "$ddefault" ] && continue
+            graph=$(set_in_graph "$graph" "$dpath" "$dtype" "$ddefault") || exit $?
+        done < <(jq -r '.params | keys[]' "$mf")
+
+        local missing
+        missing=$(jq -r '.params | to_entries[] | select(.value.required == true) | .key' "$mf")
+        while IFS= read -r dkey; do
+            [ -z "$dkey" ] && continue
+            dpath=$(jq -r --arg k "$dkey" '.params[$k].path' "$mf")
+            find_supplied "$dkey" "$dpath" "$@" >/dev/null \
+                || die "'$dkey' is required by $(basename "$mf"). Add --set $dkey=..." "$EX_USAGE"
+        done <<<"$missing"
+    fi
+
+    start=$SECONDS
+    pid=$(submit_graph "$graph") || exit $?
+
+    # Report the seed as a real JSON number when it is one: this is a
+    # reproducibility field, and "42" the string is a needless surprise
+    # in a task whose whole point is that the graph must carry 42.
+    if [[ "$seed_used" =~ ^-?[0-9]+$ ]]; then seed_json="$seed_used"; else seed_json="null"; fi
+
+    if [ "$want_wait" = "0" ]; then
+        # The id is the whole deliverable here, so it goes to stdout alone
+        # and the follow-up hint goes to stderr — a caller doing
+        # `pid=$(comfy run ... --no-wait)` must get the id and nothing else.
+        printf 'comfy: submitted; not waiting. Follow it with:\n  comfy job %s --wait\n  comfy fetch %s\n' \
+            "$pid" "$pid" >&2
+        if [ "$want_json" = "1" ]; then
+            jq -n --arg id "$pid" --argjson seed "$seed_json" \
+                '{prompt_id: $id, status: "submitted", seed: $seed}'
+        else
+            printf '%s\n' "$pid"
+        fi
+        return 0
+    fi
+
+    # Ctrl-C between submission and completion must not lose the job: it is
+    # still running on the GPU and its outputs are still retrievable.
+    trap 'printf "\ncomfy: interrupted. The job may still be running:\n  comfy fetch %s\n" "$pid" >&2; exit 130' INT
+    wait_for_job "$pid" "$timeout" || exit $?
+    trap - INT
+    files=$(download_outputs "$pid" "$out") || exit $?
+    elapsed=$((SECONDS - start))
+
+    if [ "$want_json" = "1" ]; then
+        jq -n --arg id "$pid" --argjson seed "$seed_json" --argjson el "$elapsed" \
+            --argjson files "$(printf '%s\n' "$files" | jq -R -s 'split("\n") | map(select(length > 0))')" \
+            '{prompt_id: $id, status: "success", seed: $seed, elapsed: $el, files: $files}'
+    else
+        printf '%s\n' "$files"
+    fi
+}
+
+cmd_run() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy run <workflow|path> [--set key=value]... [--out DIR] [--no-wait]" "$EX_USAGE"
+    local ref="$1"; shift
+    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0 want_wait=1
+    local sets=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --set)     require_arg --set "${2:-}";     sets+=("$2"); shift 2 ;;
+            --out)     require_arg --out "${2:-}";     out="$2"; shift 2 ;;
+            --timeout) require_arg --timeout "${2:-}"; timeout="$2"; shift 2 ;;
+            --json)    want_json=1; shift ;;
+            --no-wait) want_wait=0; shift ;;
+            *)         die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    # Still validated under --no-wait: the value is inert on that path, but a
+    # typo'd --timeout must not be silently accepted by one spelling of the
+    # command and refused by the other.
+    require_numeric_timeout "$timeout"
+    local wf
+    wf=$(resolve_workflow "$ref") || exit $?
+    run_workflow "$wf" "$out" "$timeout" "$want_json" "$want_wait" "${sets[@]+"${sets[@]}"}"
+}
+
+cmd_status() {
+    require_url
+    local stats queue
+    stats=$(api_get /system_stats) || exit $?
+    queue=$(api_get /queue) || exit $?
+    jq -r --argjson q "$queue" --arg url "$COMFYUI_URL" '
+        "ComfyUI \(.system.comfyui_version) at \($url)",
+        "device: \(.devices[0].name // "none")",
+        "vram:   \(((.devices[0].vram_free // 0) / 1073741824) | floor)Gi free " +
+        "of \(((.devices[0].vram_total // 0) / 1073741824) | floor)Gi",
+        "queue:  \($q.queue_running | length) running, \($q.queue_pending | length) pending"
+    ' <<<"$stats"
+}
+
+cmd_models() {
+    require_url
+    local folders folder names
+    if [ $# -gt 0 ]; then
+        folders="$1"
+    else
+        folders=$(api_get /models | jq -r '.[]') || exit $?
+    fi
+    while IFS= read -r folder; do
+        [ -z "$folder" ] && continue
+        names=$(api_get "/models/$folder" | jq -r '.[]?') || exit $?
+        [ -z "$names" ] && continue
+        printf '%s:\n' "$folder"
+        while IFS= read -r one; do
+            [ -n "$one" ] && printf '  %s\n' "$one"
+        done <<<"$names"
+    done <<<"$folders"
+}
+
+# ── generators ───────────────────────────────────────────────────────
+
+cmd_workflows() {
+    local name wf mf
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        wf="$COMFY_WORKFLOWS/$name.json"
+        mf=$(manifest_path "$wf")
+        if [ -f "$mf" ]; then
+            printf '%s — %s\n' "$name" "$(jq -r '.description // "no description"' "$mf")"
+            printf '  tags:   %s\n' "$(jq -r '(.tags // []) | join(", ")' "$mf")"
+            printf '  params: %s\n' "$(jq -r '.params | keys | join(", ")' "$mf")"
+        else
+            printf '%s — no manifest; use raw node paths with --set\n' "$name"
+        fi
+    done < <(list_workflow_names)
+}
+
+# Shared by txt2img and video: both are run_workflow against a tagged
+# workflow with flags mapped onto manifest parameter names.
+generate() {
+    local tag="$1"; shift
+    local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
+    local sets=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prompt)     require_arg --prompt "${2:-}";     sets+=("prompt=$2"); shift 2 ;;
+            --negative)   require_arg --negative "${2:-}";   sets+=("negative=$2"); shift 2 ;;
+            --checkpoint) require_arg --checkpoint "${2:-}"; sets+=("checkpoint=$2"); shift 2 ;;
+            --seed)       require_arg --seed "${2:-}";       sets+=("seed=$2"); shift 2 ;;
+            --steps)      require_arg --steps "${2:-}";      sets+=("steps=$2"); shift 2 ;;
+            --width)      require_arg --width "${2:-}";      sets+=("width=$2"); shift 2 ;;
+            --height)     require_arg --height "${2:-}";     sets+=("height=$2"); shift 2 ;;
+            --frames)     require_arg --frames "${2:-}";     sets+=("frames=$2"); shift 2 ;;
+            --set)        require_arg --set "${2:-}";        sets+=("$2"); shift 2 ;;
+            --out)        require_arg --out "${2:-}";        out="$2"; shift 2 ;;
+            --timeout)    require_arg --timeout "${2:-}";    timeout="$2"; shift 2 ;;
+            --json)       want_json=1; shift ;;
+            *)            die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    require_numeric_timeout "$timeout"
+    local wf
+    wf=$(workflow_for_tag "$tag") || exit $?
+    # Always waits: --no-wait is a `comfy run` flag (see the spec's command
+    # table). txt2img/video are the convenience wrappers, and their whole
+    # value is "one command, files on disk".
+    run_workflow "$wf" "$out" "$timeout" "$want_json" 1 "${sets[@]+"${sets[@]}"}"
+}
+
+cmd_txt2img() { require_url; generate txt2img "$@"; }
+cmd_video()   { require_url; generate video "$@"; }
+
+# ── job control ──────────────────────────────────────────────────────
+
+cmd_job() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy job <prompt_id> [--wait] [--json]" "$EX_USAGE"
+    local pid="$1"; shift
+    local do_wait=0 want_json=0 timeout="${COMFY_JOB_TIMEOUT:-600}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wait)    do_wait=1; shift ;;
+            --json)    want_json=1; shift ;;
+            --timeout) require_arg --timeout "${2:-}"; timeout="$2"; shift 2 ;;
+            *)         die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    require_numeric_timeout "$timeout"
+    [ "$do_wait" = "1" ] && wait_for_job "$pid" "$timeout"
+    local hist status
+    hist=$(api_get "/history/$pid") || exit $?
+    status=$(jq -r --arg id "$pid" '.[$id].status.status_str // "pending"' <<<"$hist")
+    if [ "$want_json" = "1" ]; then
+        jq -n --arg id "$pid" --arg s "$status" '{prompt_id: $id, status: $s}'
+    else
+        printf '%s %s\n' "$pid" "$status"
+    fi
+}
+
+cmd_fetch() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy fetch <prompt_id> [--out DIR]" "$EX_USAGE"
+    local pid="$1"; shift
+    local out="./comfy-out"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out) require_arg --out "${2:-}"; out="$2"; shift 2 ;;
+            *)     die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    # download_outputs reads `.[$id].outputs // {}`, so a history that does
+    # not contain $pid at all — a typo'd id, or a job still queued — used to
+    # iterate zero rows and return 0, leaving the caller with an empty
+    # directory, no output, and every reason to believe the render finished
+    # with no files. An agent that runs `run --no-wait` and fetches straight
+    # afterwards hits this every time. Decide what actually happened first,
+    # and only download on a real success.
+    local hist status detail queued
+    hist=$(api_get "/history/$pid") || exit $?
+    status=$(jq -r --arg id "$pid" \
+        'if has($id) then (.[$id].status.status_str // "pending") else "missing" end' <<<"$hist")
+    case "$status" in
+        success) ;;
+        error)
+            detail=$(jq -r --arg id "$pid" '
+                .[$id].status.messages[]? | select(.[0] == "execution_error") | .[1]
+                | "  node \(.node_id) (\(.node_type)): \(.exception_message)"' <<<"$hist")
+            die "job $pid failed in ComfyUI:
+$detail" "$EX_EXEC" ;;
+        missing)
+            queued=$(api_get /queue | jq -r --arg id "$pid" \
+                '[(.queue_running[]?[1]), (.queue_pending[]?[1])] | index($id) // empty') || exit $?
+            if [ -n "$queued" ]; then
+                die "job $pid has not finished yet — it is still in the queue.
+  Wait for it with:
+    comfy job $pid --wait" "$EX_USAGE"
+            fi
+            die "no such job '$pid' — ComfyUI's history has no entry for it, and it is not queued.
+  Check the prompt id printed by 'comfy run --no-wait'." "$EX_USAGE" ;;
+        *)
+            die "job $pid has not finished (status: $status).
+  Wait for it with:
+    comfy job $pid --wait" "$EX_USAGE" ;;
+    esac
+    download_outputs "$pid" "$out"
+}
+
+cmd_upload() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy upload <file> [--name NAME]" "$EX_USAGE"
+    local file="$1"; shift
+    [ -f "$file" ] || die "no such file: $file" "$EX_USAGE"
+    local name; name=$(basename -- "$file")
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) require_arg --name "${2:-}"; name="$2"; shift 2 ;;
+            *)      die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    # Both halves of the curl -F field ("image=@${file};filename=${name}") are
+    # agent-controlled input, and a ';', '=', '"' or newline in EITHER alters
+    # curl's own multipart-field parsing, not just the remote filename. This is
+    # not shell or JSON injection (Task 3's protections don't cover it), so it
+    # gets its own check here. Validating only --name would leave the guard
+    # looking stronger than it is: a local path containing ';' or '=' reaches
+    # exactly the same field. Reducing --name to a basename first also keeps a
+    # path out of the field; $file cannot be reduced that way — it has to stay
+    # the path curl opens.
+    name=$(basename -- "$name")
+    case "$name" in
+        *';'*|*'='*|*'"'*|*$'\n'*)
+            die "--name must not contain ';', '=', '\"', or a newline (got '$name')" "$EX_USAGE" ;;
+    esac
+    case "$file" in
+        *';'*|*'='*|*'"'*|*$'\n'*)
+            die "the file path must not contain ';', '=', '\"', or a newline (got '$file').
+  Those characters split curl's multipart field. Copy the file to a plain
+  path first, then upload that." "$EX_USAGE" ;;
+    esac
+    local body code
+    body=$(curl -sS --connect-timeout 5 --max-time "${COMFY_DOWNLOAD_TIMEOUT:-300}" \
+        -w '\n%{http_code}' -X POST \
+        -F "image=@${file};filename=${name}" -F "overwrite=true" \
+        "${COMFYUI_URL}/upload/image" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+    [ "$code" = "200" ] || die "upload failed (HTTP $code): $body" "$EX_EXEC"
+    jq -r '"\(.name) (\(.type)\(if .subfolder == "" then "" else "/" + .subfolder end))"' <<<"$body"
+}
+
+# POSTs /interrupt, which stops whatever ComfyUI is executing RIGHT NOW.
+# Split out because the caller below must decide whether that is the job the
+# operator actually named.
+interrupt_running() {
+    local body code
+    body=$(curl -sS --connect-timeout 5 --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' \
+        -X POST "${COMFYUI_URL}/interrupt" 2>/dev/null) \
+        || die "ComfyUI unreachable at $COMFYUI_URL" "$EX_UNREACHABLE"
+    code="${body##*$'\n'}"
+    [ "$code" = "200" ] || die "interrupt failed (HTTP $code)" "$EX_EXEC"
+}
+
+cmd_cancel() {
+    require_url
+    local target="${1:-}" running
+    # /interrupt takes no id — it kills the RUNNING job, whichever that is.
+    # Issuing it unconditionally meant `comfy cancel B`, with A rendering and
+    # B merely queued, killed A and left B to start: the exact opposite of
+    # what was asked, reported as "interrupted". So look at the queue first.
+    # ComfyUI's /queue returns queue_running entries shaped
+    # [number, prompt_id, prompt, extra_data, outputs] — hence [0][1].
+    running=$(api_get /queue | jq -r '.queue_running[0][1] // empty') || exit $?
+
+    if [ -z "$target" ]; then
+        # No id: "stop what is running" is unambiguous.
+        interrupt_running
+        if [ -n "$running" ]; then
+            printf 'interrupted %s\n' "$running"
+        else
+            echo "interrupted"
+        fi
+        return 0
+    fi
+
+    if [ "$target" = "$running" ]; then
+        interrupt_running
+    fi
+    # A queued (not yet running) job is removed by the /queue delete alone;
+    # for the running job this is a harmless no-op that also clears it from
+    # the queue view.
+    curl -sS --max-time "$HTTP_TIMEOUT" -X POST -H 'Content-Type: application/json' \
+        --data-binary @- "${COMFYUI_URL}/queue" \
+        <<<"$(jq -n --arg id "$target" '{delete: [$id]}')" >/dev/null 2>&1 || true
+    if [ "$target" = "$running" ]; then
+        printf 'interrupted %s\n' "$target"
+    else
+        printf 'removed %s from the queue (the running job was left alone)\n' "$target"
+    fi
+}
+
+usage() {
+    cat <<'USAGE'
+comfy — generate images and video through a ComfyUI instance
+
+  comfy status                      version, device, free VRAM, queue depth
+  comfy models [FOLDER]             installed models, by folder
+  comfy workflows                   available workflows and their parameters
+
+  comfy txt2img --prompt TEXT       generate an image
+      [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
+      [--width N] [--height N] [--out DIR] [--json]
+  comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+  comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
+      [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
+      [--no-wait]                   submit only; print the prompt id and return
+                                    (collect it later with job/fetch)
+
+  comfy job ID [--wait] [--json]    status of a queued job
+  comfy fetch ID [--out DIR]        download a finished job's outputs
+  comfy upload FILE [--name NAME]   upload an input image
+  comfy cancel [ID]                 with no ID, interrupt whatever is running;
+                                    with one, interrupt it only if it is the
+                                    running job, else just dequeue it
+
+Exit codes: 0 ok, 1 usage, 2 ComfyUI unreachable, 3 execution error, 4 timeout,
+130 interrupted (Ctrl-C) — the job may still be running; see "comfy fetch".
+
+Environment:
+  COMFYUI_URL        base URL of the ComfyUI API (set by the sandbox CLI)
+  COMFY_WORKFLOWS    shared workflow directory (default /opt/comfy-workflows)
+USAGE
+}
+
+case "${1:-help}" in
+    status)         shift; cmd_status "$@" ;;
+    models)         shift; cmd_models "$@" ;;
+    workflows)      shift; cmd_workflows "$@" ;;
+    run)            shift; cmd_run "$@" ;;
+    txt2img)        shift; cmd_txt2img "$@" ;;
+    video)          shift; cmd_video "$@" ;;
+    job)            shift; cmd_job "$@" ;;
+    fetch)          shift; cmd_fetch "$@" ;;
+    upload)         shift; cmd_upload "$@" ;;
+    cancel)         shift; cmd_cancel "$@" ;;
+    help|-h|--help) usage ;;
+    *)              printf 'comfy: unknown command: %s\n\n' "$1" >&2; usage >&2; exit "$EX_USAGE" ;;
+esac

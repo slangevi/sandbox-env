@@ -289,6 +289,7 @@ Composable install scripts in `features/`. Add them to your `sandbox.yaml` to in
 | `glab` | GitLab CLI |
 | `ollama` | Ollama server (runs inside the container) |
 | `llm` | Simon Willison's llm CLI with Claude and Ollama plugins (requires `python`) |
+| `comfyui` | `comfy` helper for generating images and video through a ComfyUI instance on the host |
 
 ### Adding a feature
 
@@ -298,6 +299,14 @@ Drop a script in `features/`. It must:
 2. Install non-interactively
 3. Clean up after itself (`rm -rf /var/lib/apt/lists/*`)
 4. Optionally write firewall domains to `/etc/sandbox/firewall.d/<name>.conf`
+
+A feature may also ship a companion `features/<name>.d/` directory of extra
+files (`comfyui` does, for the `comfy` helper itself) — `sandbox build`
+copies it into the build context and removes it after the feature script
+runs, so those files are gone from the final image's *filesystem*. They are
+not gone from the image: the `COPY` creates a layer that the later `rm -rf`
+cannot erase, and anyone who can pull the image can read it back. Ship only
+what you would publish — never a credential or a private key.
 
 ## CLI Commands
 
@@ -314,6 +323,8 @@ sandbox remote-spark <model> Remote control backed by the sparkyard gateway
 sandbox ollama <cmd>        Run Ollama commands in the sandbox
 sandbox llm [--spark] [args] Run the llm CLI in the sandbox, or against sparkyard with --spark
 sandbox spark-status [model] Show sparkyard backend config (and check a model)
+sandbox comfy <args>        Run the comfy helper (`status`, `models`, `txt2img`, `run`, …)
+sandbox comfy-status        ComfyUI backend configuration and installed models
 sandbox login               Authenticate Claude Code for this project
 sandbox trust               Mark /workspace trusted for headless runs (enables the .claude/settings.json allowlist)
 sandbox start               Start the sandbox in the background
@@ -596,6 +607,124 @@ sandbox ollama run llama3.2
 # Or run a one-off prompt
 sandbox ollama run llama3.2 "Explain this code"
 ```
+
+## ComfyUI
+
+Generate images and video through a ComfyUI instance already running on the
+host. Add the feature and rebuild:
+
+```yaml
+name: my-project
+features:
+  - comfyui
+```
+
+```bash
+sandbox build
+sandbox comfy-status          # what was discovered, and what models exist
+sandbox comfy models          # installed checkpoints, loras, vae, ...
+sandbox comfy txt2img --prompt "a red apple on a wooden table"
+```
+
+Inside a sandbox, the agent uses the same `comfy` command directly:
+
+```
+comfy status                      version, device, free VRAM, queue depth
+comfy models [FOLDER]             installed models, by folder
+comfy workflows                   available workflows and their parameters
+
+comfy txt2img --prompt TEXT       generate an image
+    [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
+    [--width N] [--height N] [--out DIR] [--json]
+comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
+    [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
+    [--no-wait]                   submit only; print the prompt id and return
+                                  (collect it later with job/fetch)
+
+comfy job ID [--wait] [--json]    status of a queued job
+comfy fetch ID [--out DIR]        download a finished job's outputs
+comfy upload FILE [--name NAME]   upload an input image
+comfy cancel [ID]                 with no ID, interrupt whatever is running;
+                                  with one, interrupt it only if it is the
+                                  running job, else just dequeue it
+```
+
+Exit codes: `0` ok, `1` usage/config, `2` ComfyUI unreachable, `3` execution
+error, `4` timeout, and `130` if you interrupt it with Ctrl-C (the job may
+still be running on the GPU — the interrupt message tells you the `comfy
+fetch` command to retrieve it later).
+
+**How it finds ComfyUI.** A few `docker inspect comfyui` calls at launch
+yield the container's Docker network, its address, and — from the compose
+`working_dir` label — the repo whose `workflows/` directory is mounted at
+`/opt/comfy-workflows` read-only. The sandbox joins that network and reaches
+ComfyUI at `http://comfyui:8188`. Override any part in
+`~/.config/sandbox/comfyui.env`:
+
+```
+COMFYUI_CONTAINER=comfyui
+COMFYUI_URL=http://comfyui:8188
+COMFYUI_NETWORK=comfyui_default
+COMFYUI_WORKFLOWS=/path/to/workflows
+```
+
+On Docker's default `bridge` network the URL is built from the container's IP
+instead of its name: Docker's embedded DNS resolves container names on
+user-defined networks only, so `http://comfyui:8188` would never resolve there.
+
+A ComfyUI running in `network_mode: host` (or `none`, or `container:`) is not
+on a network a sandbox can join — attaching one of those would hand the
+sandbox the host's own network stack, which the strict firewall would then
+rewrite. Those are refused by name, and the fix is to reach it through the
+host gateway instead:
+
+```
+COMFYUI_URL=http://host.docker.internal:8188
+```
+
+With that set, the sandbox maps `host.docker.internal` to the host gateway and
+joins no network at all. The strict firewall already allows the gateway.
+
+If ComfyUI is not running, the sandbox starts anyway and `comfy` says it is
+not wired in. With `firewall: strict`, the container's discovered address is
+also added to the strict firewall's allowlist (as a bare IPv4 literal only —
+anything else is warned about and omitted), so the sandbox can actually
+reach it; nothing further to configure for that.
+
+**Workflows and manifests.** `comfy run <workflow>` executes any API-format
+workflow from the shared directory or a path in the workspace. A workflow with
+a sibling `<name>.params.json` manifest gets friendly parameter names
+(`--set prompt="..."`); without one, raw node paths still work
+(`--set 3.inputs.seed=42`). `comfy txt2img` and `comfy video` pick the
+workflow tagged `txt2img` or `video`.
+
+**Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
+id and returns immediately — nothing is polled and nothing is downloaded. Pick
+it up whenever it finishes:
+
+```bash
+id=$(comfy run my-video --set prompt="..." --no-wait)
+comfy job "$id"                   # queued / success / error
+comfy fetch "$id" --out ./renders # download the outputs
+```
+
+A render that outlives any `--timeout` you would sit through is exactly what
+this is for. Everything else about the run is unchanged: parameters, manifest
+defaults and `--json` all behave the same.
+
+**Security.** ComfyUI has no authentication, so anything that can reach it can
+reach its whole API — including ComfyUI-Manager's custom-node install
+endpoints, which execute code inside the ComfyUI container. That is why this
+is opt-in per project: a project without the `comfyui` feature never joins the
+network. The `comfy` helper is ergonomics, not a security boundary.
+
+For the same reason, `features: [comfyui]` and the sparkyard backend are
+refused together: `claude-spark`, `remote-spark`, `run --spark` and
+`llm --spark` all inject a LiteLLM gateway **admin** key, and a sandbox
+holding that key must not also have a route to an unauthenticated API that
+can execute code. `SPARKYARD_ALLOW_UNSAFE_FIREWALL=1` overrides it — the same
+switch that overrides the weakened-firewall refusal.
 
 ## LLM CLI
 

@@ -1,8 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Resolve the sandbox-env repo root (where this script lives)
-SANDBOX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Overridable so tests can point the CLI at a synthetic repo root holding
+# fixture features and templates. Not a security boundary: anyone who can set
+# this already controls the image build end to end.
+SANDBOX_ROOT="${SANDBOX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 # Colors
 RED='\033[0;31m'
@@ -169,7 +171,23 @@ validate_env_key() {
 # config) and validate_run_env (per-run CLI input) so the two lists cannot
 # drift apart; see the comments on each caller for what each variable would
 # let an attacker do. A `case` (not a regex) so the trailing `*` prefixes
-# (SANDBOX_GIT_*, ANTHROPIC_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*) work.
+# (SANDBOX_*, ANTHROPIC_*, GIT_CONFIG_KEY_*, GIT_CONFIG_VALUE_*) work.
+#
+# The whole SANDBOX_* namespace is reserved, not an enumerated handful of
+# names. Every SANDBOX_* variable is a CLI-to-entrypoint control channel:
+# SANDBOX_FIREWALL and SANDBOX_ALLOWED_DOMAINS steer init-firewall.sh,
+# SANDBOX_COMFYUI_IP lands straight in its allowed-domains ipset as an IP
+# literal or CIDR (collect_domains reads it unconditionally — the `comfyui`
+# feature is NOT a precondition), and SANDBOX_GIT_* drives the entrypoint's
+# git config. `env: {SANDBOX_COMFYUI_IP: 1.0.0.0/8}` in a committed
+# sandbox.yaml is a 16-million-address egress hole that still reads as
+# `firewall: strict` with no `allowed_domains` — so it also slips past
+# _spark_guard_firewall and gets the gateway ADMIN key injected alongside it.
+# Reserving the PREFIX (as validate_run_env already does for --env) means the
+# next such variable is covered the day it is added, rather than depending on
+# whoever adds it remembering to extend a list. The CLI's own legitimate
+# `-e SANDBOX_COMFYUI_IP=<ip>` / `-e SANDBOX_GIT_*` are appended directly to
+# DOCKER_ARGS and never pass through this loop, so they are unaffected.
 env_key_is_dangerous() {
     local key="$1"
     case "$key" in
@@ -177,7 +195,7 @@ env_key_is_dangerous() {
         NPM_CONFIG_PREFIX|NPM_CONFIG_REGISTRY|PYTHONPATH|PROMPT_COMMAND|\
         EDITOR|VISUAL|DOCKER_HOST|\
         http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|\
-        SANDBOX_FIREWALL|SANDBOX_ALLOWED_DOMAINS|SANDBOX_GIT_*|ANTHROPIC_*|\
+        SANDBOX_*|ANTHROPIC_*|\
         BASH_ENV|ENV|GIT_SSH_COMMAND|GIT_EXEC_PATH|GIT_PROXY_COMMAND|\
         GIT_CONFIG_COUNT|GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*)
             return 0 ;;
@@ -805,9 +823,9 @@ spark_config_path() {
     echo "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env"
 }
 
-# Read one KEY=VALUE from the sparkyard env file WITHOUT sourcing it.
+# Read one KEY=VALUE from an env-style config file WITHOUT sourcing it.
 # Sourcing would execute arbitrary code as the user from a config file.
-_spark_config_read() {
+_env_file_read() {
     local key="$1" file="$2" line val
     [ -f "$file" ] || return 0
     line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" | tail -n 1) || true
@@ -844,7 +862,7 @@ _load_spark_env() {
         fi
     fi
 
-    SPARK_URL="${SPARKYARD_URL:-$(_spark_config_read SPARKYARD_URL "$file")}"
+    SPARK_URL="${SPARKYARD_URL:-$(_env_file_read SPARKYARD_URL "$file")}"
     SPARK_URL="${SPARK_URL:-$SPARK_DEFAULT_URL}"
     SPARK_URL="${SPARK_URL%/}"
     # Users copy the base URL straight out of LiteLLM's docs, which include
@@ -855,8 +873,8 @@ _load_spark_env() {
         error "A value like a curl option (e.g. -K/path/to/file) is not a URL."
         exit 1
     fi
-    SPARK_KEY="${LITELLM_MASTER_KEY:-$(_spark_config_read LITELLM_MASTER_KEY "$file")}"
-    SPARK_DEFAULT_MODEL="${SPARKYARD_MODEL:-$(_spark_config_read SPARKYARD_MODEL "$file")}"
+    SPARK_KEY="${LITELLM_MASTER_KEY:-$(_env_file_read LITELLM_MASTER_KEY "$file")}"
+    SPARK_DEFAULT_MODEL="${SPARKYARD_MODEL:-$(_env_file_read SPARKYARD_MODEL "$file")}"
 
     if [ -z "$SPARK_KEY" ]; then
         error "No LiteLLM master key found for the sparkyard backend."
@@ -950,6 +968,16 @@ _spark_preflight() {
 # egress is refused by default. SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 is an
 # explicit escape hatch for a project the caller trusts.
 #
+# features: [comfyui] is refused on the same terms, and deliberately so: it
+# joins the sandbox to the ComfyUI container's network and punches that
+# container's address through strict mode, and ComfyUI's API is
+# unauthenticated — its ComfyUI-Manager endpoints install and execute code in
+# a container that has unrestricted internet egress of its own. That is a
+# materially equivalent risk to an attacker-chosen allowed_domains entry, so
+# it gets the same treatment rather than a bare warning: a project with
+# firewall: strict and no allowed_domains otherwise sails straight through
+# this guard and receives the ADMIN key.
+#
 # Called from every spark entry point that will actually launch a container
 # carrying the key: cmd_claude_spark (covers both its attach and fresh
 # branches — this is called before that branch decision), cmd_remote_spark,
@@ -957,7 +985,7 @@ _spark_preflight() {
 # ships the key into a container, so it doesn't call this.
 _spark_guard_firewall() {
     [ -n "${CONFIG_FILE:-}" ] || return 0
-    local fw allowed
+    local fw allowed feature has_comfyui=false refuse=0
     fw=$(config_get_default '.firewall' 'strict')
     # Do not pipe config_get's output into `head`: once allowed_domains is
     # long enough to exceed the pipe buffer, `head` exits after its first
@@ -968,8 +996,23 @@ _spark_guard_firewall() {
     # first line in bash.
     allowed=$(config_get '.allowed_domains[]')
     allowed=${allowed%%$'\n'*}
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+
     if [ "$fw" != "strict" ] || [ -n "$allowed" ]; then
         error "This project's sandbox.yaml weakens egress control ($([ "$fw" != strict ] && echo "firewall: $fw" || echo "allowed_domains set"))."
+        refuse=1
+    fi
+    # Reported separately, and both are reported when both apply: an operator
+    # who fixes only the one named in the first line would otherwise be sent
+    # round the loop again.
+    if $has_comfyui; then
+        error "This project's sandbox.yaml has features: [comfyui], which gives the sandbox a route to an unauthenticated ComfyUI API that can execute code."
+        refuse=1
+    fi
+
+    if [ "$refuse" = "1" ]; then
         error "The sparkyard master key is a gateway ADMIN credential; refusing to inject it."
         error "Override with SPARKYARD_ALLOW_UNSAFE_FIREWALL=1 if this project is trusted."
         [ "${SPARKYARD_ALLOW_UNSAFE_FIREWALL:-0}" = "1" ] || exit 1
@@ -1032,6 +1075,277 @@ cmd_spark_status() {
     fi
 }
 
+# ── ComfyUI backend ──────────────────────────────────────────────────
+
+COMFY_DEFAULT_CONTAINER="comfyui"
+COMFY_DEFAULT_PORT="8188"
+
+comfy_config_path() {
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/comfyui.env"
+}
+
+# Each key independently: real env var, then config file, then default.
+# There is no secret here — unlike sparkyard, ComfyUI has no credential to
+# leak — so there is no permissions warning and no firewall guard.
+_load_comfy_env() {
+    local file
+    file=$(comfy_config_path)
+    COMFY_CONTAINER="${COMFYUI_CONTAINER:-$(_env_file_read COMFYUI_CONTAINER "$file")}"
+    COMFY_CONTAINER="${COMFY_CONTAINER:-$COMFY_DEFAULT_CONTAINER}"
+    COMFY_URL_OVERRIDE="${COMFYUI_URL:-$(_env_file_read COMFYUI_URL "$file")}"
+    COMFY_NETWORK_OVERRIDE="${COMFYUI_NETWORK:-$(_env_file_read COMFYUI_NETWORK "$file")}"
+    COMFY_WORKFLOWS_OVERRIDE="${COMFYUI_WORKFLOWS:-$(_env_file_read COMFYUI_WORKFLOWS "$file")}"
+}
+
+# A few `docker inspect` calls yield network, address, workflow directory and
+# published port (four here, plus one in _comfy_preflight — each asks for a
+# single --format field, which is far easier to read than one combined
+# template). Returns 1 with a reason in COMFY_DISCOVER_ERROR rather than
+# exiting: a sandbox whose ComfyUI is down should still start.
+_comfy_discover() {
+    COMFY_DISCOVER_ERROR=""
+    COMFY_NETWORK=""; COMFY_IP=""; COMFY_URL=""
+    COMFY_WORKFLOWS_DIR=""; COMFY_HOST_URL=""
+
+    local running
+    running=$(docker inspect --format '{{.State.Running}}' "$COMFY_CONTAINER" 2>/dev/null) || running=""
+    if [ "$running" != "true" ]; then
+        COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' is not running"
+        return 1
+    fi
+
+    local netjson names count
+    netjson=$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$COMFY_CONTAINER" 2>/dev/null) || netjson="{}"
+    names=$(yq -p json -r 'keys | .[]' <<<"$netjson" 2>/dev/null) || names=""
+    if [ -n "$COMFY_NETWORK_OVERRIDE" ]; then
+        COMFY_NETWORK="$COMFY_NETWORK_OVERRIDE"
+        # An override naming a network the container is NOT on used to be
+        # accepted silently: the IPAddress lookup below then yielded "", the
+        # firewall entry was skipped, and every later `comfy` call failed with
+        # a bare "unreachable" that named neither the override nor the
+        # mistake. Refuse it here, where the container's actual networks are
+        # in hand to name in the message.
+        if ! grep -Fxq -- "$COMFY_NETWORK" <<<"$names"; then
+            COMFY_DISCOVER_ERROR="COMFYUI_NETWORK='$COMFY_NETWORK' is not one of the networks container '$COMFY_CONTAINER' is on ($(printf '%s' "$names" | tr '\n' ' ')); fix it in $(comfy_config_path)"
+            return 1
+        fi
+    else
+        count=$(printf '%s\n' "$names" | grep -c . ) || count=0
+        if [ "$count" = "1" ]; then
+            COMFY_NETWORK=$(printf '%s\n' "$names" | grep . )
+        else
+            COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' is on $count networks ($(printf '%s' "$names" | tr '\n' ' ')); set COMFYUI_NETWORK in $(comfy_config_path)"
+            return 1
+        fi
+    fi
+
+    # Three network MODES are not networks a second container can join, and
+    # handing any of them to `docker run --network` is actively destructive
+    # here: this CLI also passes --cap-add NET_ADMIN/NET_RAW, so a sandbox
+    # started with `--network host` runs init-firewall.sh's `iptables -F` and
+    # `iptables -P OUTPUT DROP` against the HOST's own network stack. A GPU
+    # ComfyUI on `network_mode: host` is a common setup, and `docker inspect`
+    # reports it as a single network named "host" — indistinguishable, to the
+    # count check above, from a real user-defined network. Refuse all three
+    # (`none` gives the sandbox no network at all; `container:<id>` shares
+    # another container's stack) and name the remedy: reaching ComfyUI
+    # through the host gateway instead, which _build_docker_args wires up
+    # from the override even though discovery failed here.
+    case "$COMFY_NETWORK" in
+        host|none|container:*)
+            COMFY_DISCOVER_ERROR="container '$COMFY_CONTAINER' uses network mode '$COMFY_NETWORK', which a sandbox cannot join; set COMFYUI_URL=http://host.docker.internal:${COMFY_DEFAULT_PORT} in $(comfy_config_path) to reach it through the host gateway instead"
+            return 1 ;;
+    esac
+
+    # strenv passes the network name as DATA, never as a yq expression.
+    COMFY_IP=$(net="$COMFY_NETWORK" yq -p json -r '.[strenv(net)].IPAddress // ""' <<<"$netjson" 2>/dev/null) || COMFY_IP=""
+
+    if [ -n "$COMFY_URL_OVERRIDE" ]; then
+        COMFY_URL="${COMFY_URL_OVERRIDE%/}"
+    elif [ "$COMFY_NETWORK" = "bridge" ] \
+            && [[ "$COMFY_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        # Docker's embedded DNS resolves container names on USER-DEFINED
+        # networks only; the default `bridge` has no name resolution at all.
+        # A ComfyUI started with a plain `docker run` (no compose project, no
+        # --network) lands there, discovery succeeds, and the container-name
+        # URL below would then never resolve inside the sandbox. Address it
+        # by IP instead — the same dotted-quad shape the firewall entry
+        # below insists on, checked here too so a malformed address cannot
+        # become a malformed URL.
+        COMFY_URL="http://${COMFY_IP}:${COMFY_DEFAULT_PORT}"
+    else
+        # The container's own network alias and ComfyUI's INTERNAL port.
+        # Container to container: the host's published port is irrelevant here.
+        COMFY_URL="http://${COMFY_CONTAINER}:${COMFY_DEFAULT_PORT}"
+    fi
+
+    if [ -n "$COMFY_WORKFLOWS_OVERRIDE" ]; then
+        COMFY_WORKFLOWS_DIR="$COMFY_WORKFLOWS_OVERRIDE"
+    else
+        local workdir
+        workdir=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$COMFY_CONTAINER" 2>/dev/null) || workdir=""
+        case "$workdir" in
+            ""|"<no value>") ;;
+            *) COMFY_WORKFLOWS_DIR="$workdir/workflows" ;;
+        esac
+    fi
+
+    # The published port, for the HOST-side preflight only. ComfyUI is
+    # published on loopback, so this is how the host can reach it at all.
+    local portjson hostport
+    portjson=$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$COMFY_CONTAINER" 2>/dev/null) || portjson="{}"
+    hostport=$(key="${COMFY_DEFAULT_PORT}/tcp" yq -p json -r '.[strenv(key)][0].HostPort // ""' <<<"$portjson" 2>/dev/null) || hostport=""
+    [ -n "$hostport" ] && COMFY_HOST_URL="http://127.0.0.1:${hostport}"
+
+    return 0
+}
+
+# Warns, never exits: a slow or unhealthy ComfyUI should not block a launch.
+_comfy_preflight() {
+    local health
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$COMFY_CONTAINER" 2>/dev/null) || health="none"
+    case "$health" in
+        starting)
+            warn "ComfyUI is still starting — a cold start builds the overlay venv; budget up to 300s." ;;
+        unhealthy)
+            warn "ComfyUI reports unhealthy: it may be running on the CPU, or still loading." ;;
+    esac
+    if [ -n "$COMFY_HOST_URL" ]; then
+        curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/system_stats" >/dev/null 2>&1 \
+            || warn "ComfyUI did not answer at ${COMFY_HOST_URL}/system_stats"
+    fi
+}
+
+# Runs docker, or prints the invocation when SANDBOX_DRY_RUN=1.
+_comfy_run() {
+    if [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+        printf 'docker'
+        printf ' %s' "$@"
+        printf '\n'
+        return 0
+    fi
+    docker "$@"
+}
+
+cmd_comfy_status() {
+    _load_comfy_env
+    echo "ComfyUI backend configuration"
+    echo "  config file:  $(comfy_config_path)"
+    echo "  container:    $COMFY_CONTAINER"
+    if _comfy_discover; then
+        echo "  network:      $COMFY_NETWORK"
+        echo "  address:      ${COMFY_IP:-(unknown)}"
+        echo "  url:          $COMFY_URL"
+        echo "  workflows:    ${COMFY_WORKFLOWS_DIR:-(none found)}"
+        _comfy_preflight
+        if [ -n "$COMFY_HOST_URL" ]; then
+            local folders
+            folders=$(curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/models" 2>/dev/null \
+                | yq -p json -r '.[]' 2>/dev/null) || folders=""
+            local folder names n
+            while IFS= read -r folder; do
+                [ -z "$folder" ] && continue
+                names=$(curl -sf --connect-timeout 5 --max-time 10 "${COMFY_HOST_URL}/models/${folder}" 2>/dev/null \
+                    | yq -p json -r '.[]' 2>/dev/null) || names=""
+                n=$(printf '%s\n' "$names" | grep -c . ) || n=0
+                [ "$n" = "0" ] && continue
+                printf '  models:       %s (%s)\n' "$folder" "$n"
+            done <<<"$folders"
+        fi
+    else
+        warn "ComfyUI not available: ${COMFY_DISCOVER_ERROR}."
+    fi
+}
+
+cmd_comfy() {
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+
+    # Feature check FIRST: a project with neither the feature nor a built
+    # image should be told about the missing feature, not "image not
+    # found" — the feature is the cheaper check and the more specific
+    # diagnosis (fixing the image doesn't fix a missing feature, but adding
+    # the feature always requires a rebuild anyway).
+    local has_comfyui=false
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+    if ! $has_comfyui; then
+        error "This project does not have the 'comfyui' feature."
+        error "Add it to features: in $CONFIG_FILE, then: sandbox build"
+        exit 1
+    fi
+
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    _build_docker_args "$name"
+
+    # DOCKER_ARGS begins with `--name sandbox-<name>`, which would collide
+    # with an already-running sandbox of the same project. Drop the flag AND
+    # its value — a `${DOCKER_ARGS[@]:1}` slice drops only the flag, leaving
+    # the name behind as a stray argument to `docker run`.
+    local args=() skip=0 a
+    for a in "${DOCKER_ARGS[@]}"; do
+        if [ "$skip" = "1" ]; then skip=0; continue; fi
+        if [ "$a" = "--name" ]; then skip=1; continue; fi
+        args+=("$a")
+    done
+
+    # _build_docker_args only adds the default `$(pwd):/workspace` mount when
+    # the project defines NO mounts:. Every other caller is fine with that —
+    # the project's own mounts: are where its work lives. This one is not:
+    # `comfy` writes its outputs to ./comfy-out inside the container and
+    # prints host-looking paths for them, so without a /workspace the whole
+    # run landed in the image's own filesystem and `--rm` deleted it, exit 0,
+    # no warning. Add the default mount back when nothing else targets
+    # /workspace, built exactly as _build_docker_args builds it.
+    local has_workspace=false prev="" target
+    for a in "${args[@]}"; do
+        if [ "$prev" = "-v" ]; then
+            target="${a#*:}"; target="${target%%:*}"
+            [ "$target" = "/workspace" ] && has_workspace=true
+        fi
+        prev="$a"
+    done
+    if ! $has_workspace; then
+        args+=("-v" "$(pwd):/workspace")
+        # That mount also re-exposes sandbox.yaml, which _build_docker_args
+        # went out of its way to protect. Re-apply the same read-only overlay
+        # here rather than handing a ComfyUI-supplied output filename (they
+        # are basename-reduced, but a basename of "sandbox.yaml" is a
+        # basename) a writable path to the config that governs the next run.
+        # Warn-and-skip on a colon, rather than _build_docker_args's hard
+        # exit: this is the ComfyUI path, where nothing blocks a launch.
+        local comfy_cfg_abs
+        comfy_cfg_abs="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd -P)/$(basename -- "$CONFIG_FILE")"
+        if [ "${SANDBOX_ALLOW_WRITABLE_CONFIG:-0}" = "1" ]; then
+            warn "SANDBOX_ALLOW_WRITABLE_CONFIG=1 — $CONFIG_FILE is writable in this container."
+        else
+            case "$comfy_cfg_abs" in
+                *:*|*$'\n'*|*$'\r'*)
+                    warn "Not protecting $CONFIG_FILE — its resolved path contains a ':' or a newline." ;;
+                *)
+                    args+=("-v" "${comfy_cfg_abs}:/workspace/$(basename -- "$CONFIG_FILE"):ro") ;;
+            esac
+        fi
+    fi
+
+    # No explicit --rm: _build_docker_args already emits one, and repeating it
+    # produced `docker run --rm --rm` (harmless to docker, but it reads as a
+    # bug in every dry-run trace). cmd_llm's run call has the same shape.
+    _comfy_run run "${args[@]}" \
+        "sandbox-${name}:latest" \
+        bash -lc 'comfy "$@"' _ "$@"
+}
+
 # ── Commands ─────────────────────────────────────────────────────────
 
 cmd_build_base() {
@@ -1057,14 +1371,6 @@ cmd_build() {
     fi
     validate_name "$name"
 
-    # Check base image exists
-    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
-        error "Base image not found. Run 'sandbox build-base' first."
-        exit 1
-    fi
-
-    log "Building project image: sandbox-${name}:latest"
-
     # Generate Dockerfile from template
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -1085,8 +1391,17 @@ cmd_build() {
             exit 1
         fi
         cp "$script" "$tmpdir/${feature}.sh"
+        # A feature may ship a companion directory of assets (scripts it
+        # installs, config it copies). validate_feature has already bounded
+        # $feature to ^[a-z0-9][a-z0-9-]*$, so neither path can escape.
+        local assets="$SANDBOX_ROOT/features/${feature}.d"
+        if [ -d "$assets" ]; then
+            cp -R "$assets" "$tmpdir/${feature}.d"
+            features_block="${features_block}COPY ${feature}.d/ /tmp/${feature}.d/
+"
+        fi
         features_block="${features_block}COPY ${feature}.sh /tmp/${feature}.sh
-RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm /tmp/${feature}.sh
+RUN chmod +x /tmp/${feature}.sh && /tmp/${feature}.sh && rm -rf /tmp/${feature}.sh /tmp/${feature}.d
 "
     done < <(config_get '.features[]')
 
@@ -1124,6 +1439,24 @@ RUN chmod +x /tmp/custom-setup.sh && /tmp/custom-setup.sh && rm /tmp/custom-setu
             *)              printf '%s\n' "$line" ;;
         esac
     done < "$SANDBOX_ROOT/templates/Dockerfile.project.tmpl" > "$dockerfile"
+
+    # Print what would be built instead of building it. Used by
+    # tests/test-build-assets.sh to assert staging without Docker.
+    if [ "${SANDBOX_DRY_RUN:-0}" = "1" ]; then
+        echo "--- Dockerfile ---"
+        cat "$dockerfile"
+        echo "--- staged files ---"
+        (cd "$tmpdir" && find . -type f | sed 's|^\./||' | sort)
+        return 0
+    fi
+
+    # Check base image exists
+    if [ -z "$(docker image ls -q sandbox-base:latest 2>/dev/null)" ]; then
+        error "Base image not found. Run 'sandbox build-base' first."
+        exit 1
+    fi
+
+    log "Building project image: sandbox-${name}:latest"
 
     # Build
     docker build $no_cache \
@@ -1363,6 +1696,99 @@ _build_docker_args() {
     done < <(config_get '.features[]')
     if $has_ollama; then
         DOCKER_ARGS+=("-v" "sandbox-ollama-models:/home/node/.ollama")
+    fi
+
+    # ComfyUI — same feature-detection shape as Ollama above, so every
+    # container-launching command inherits this without knowing about it.
+    local has_comfyui=false
+    while IFS= read -r feature; do
+        [ "$feature" = "comfyui" ] && has_comfyui=true
+    done < <(config_get '.features[]')
+    if $has_comfyui; then
+        _load_comfy_env
+        if _comfy_discover; then
+            _comfy_preflight
+            DOCKER_ARGS+=("--network" "$COMFY_NETWORK")
+            DOCKER_ARGS+=("-e" "COMFYUI_URL=$COMFY_URL")
+            if [ -n "$COMFY_IP" ]; then
+                # This value flows straight into init-firewall.sh's
+                # allowed-domains ipset as an IP literal, so it gets the same
+                # treatment as every other externally-derived value this CLI
+                # forwards into a container (env keys, mounts, git config
+                # keys, claude args, allowed_domains): accept only a bare
+                # IPv4 dotted-quad. A CIDR like 0.0.0.0/0 here would defeat
+                # strict mode's default-DROP policy entirely, and a newline
+                # would add more than one ipset entry — so both are checked
+                # explicitly rather than trusted to the regex's own anchors.
+                # Unreachable today (COMFY_IP comes from `docker inspect`'s
+                # IPAddress field, which is always well-formed), but a value
+                # landing in a firewall allowlist has the strongest claim of
+                # any of them to being validated anyway.
+                case "$COMFY_IP" in
+                    *$'\n'*|*$'\r'*)
+                        warn "ComfyUI address '$COMFY_IP' contains a newline — refusing to add it to the firewall allowlist." ;;
+                    *)
+                        if [[ "$COMFY_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                            # Distinct from SANDBOX_ALLOWED_DOMAINS on
+                            # purpose: this value is derived by the CLI, not
+                            # supplied by a committed config.
+                            DOCKER_ARGS+=("-e" "SANDBOX_COMFYUI_IP=$COMFY_IP")
+                        else
+                            warn "ComfyUI address '$COMFY_IP' is not a plain IPv4 address — refusing to add it to the firewall allowlist."
+                        fi
+                        ;;
+                esac
+            fi
+            if [ -n "$COMFY_WORKFLOWS_DIR" ] && [ -d "$COMFY_WORKFLOWS_DIR" ]; then
+                # A compose label is data from outside this script, so it gets
+                # the same validation a committed mounts: entry would — but
+                # NOT the same consequence. validate_mount refuses by calling
+                # `exit 1`, with a message blaming $CONFIG_FILE, so a compose
+                # project whose workflows/ resolves somewhere the validator
+                # classes as sensitive would kill every `sandbox run`/`claude`/
+                # `start` for the project, naming a file the path isn't even
+                # in. This feature's rule is warn-and-continue: an unusable
+                # ComfyUI never blocks a launch. So probe first in a SUBSHELL
+                # (where that `exit` kills only the subshell and the misleading
+                # message is discarded), and make the real call — the one that
+                # publishes VALIDATED_MOUNT_PATH, which a subshell cannot —
+                # only once the probe has proved it will not exit.
+                if ( validate_mount "$COMFY_WORKFLOWS_DIR" ) >/dev/null 2>&1; then
+                    validate_mount "$COMFY_WORKFLOWS_DIR"
+                    DOCKER_ARGS+=("-v" "${VALIDATED_MOUNT_PATH}:/opt/comfy-workflows:ro")
+                    DOCKER_ARGS+=("-e" "COMFY_WORKFLOWS=/opt/comfy-workflows")
+                else
+                    warn "ComfyUI workflow directory $COMFY_WORKFLOWS_DIR was refused by the mount validator — skipping it; 'comfy workflows' will be empty."
+                    warn "Point COMFYUI_WORKFLOWS in $(comfy_config_path) at a directory outside the credential and system paths."
+                fi
+            elif [ -n "$COMFY_WORKFLOWS_DIR" ]; then
+                warn "ComfyUI workflow directory not found at $COMFY_WORKFLOWS_DIR — 'comfy workflows' will be empty."
+            fi
+        else
+            warn "ComfyUI not available: ${COMFY_DISCOVER_ERROR}."
+            # The documented remedy for a ComfyUI a sandbox cannot join on a
+            # network (network_mode: host/none/container:, or an instance not
+            # in a container at all) is COMFYUI_URL=http://host.docker.internal
+            # — which only works if the container is actually TOLD where that
+            # name points. Wire exactly that, the same way
+            # _apply_spark_backend does for the gateway: the URL plus an
+            # --add-host mapping, and NO --network (attaching the refused
+            # network is the bug this avoids). The strict firewall already
+            # permits the default gateway (init-firewall.sh step 8), so no
+            # SANDBOX_COMFYUI_IP ipset entry is needed or added here.
+            local comfy_ovr_host=""
+            if [ -n "${COMFY_URL_OVERRIDE:-}" ]; then
+                comfy_ovr_host="${COMFY_URL_OVERRIDE#*://}"
+                comfy_ovr_host="${comfy_ovr_host%%[:/]*}"
+            fi
+            if [ "$comfy_ovr_host" = "host.docker.internal" ]; then
+                DOCKER_ARGS+=("--add-host" "host.docker.internal:host-gateway")
+                DOCKER_ARGS+=("-e" "COMFYUI_URL=${COMFY_URL_OVERRIDE%/}")
+                warn "Using COMFYUI_URL=${COMFY_URL_OVERRIDE%/} through the host gateway instead."
+            else
+                warn "The sandbox will start without it; 'comfy' will say it is not wired in."
+            fi
+        fi
     fi
 
     # Absolute physical path of the config file, computed ONCE, here, before
@@ -2673,6 +3099,8 @@ Commands:
   ollama <cmd>        Run Ollama commands in the sandbox
   llm [--spark] [args]  Run the llm CLI in the sandbox
   spark-status [model]  Show sparkyard backend config (and check a model)
+  comfy <args>        Run the comfy helper (generate images/video)
+  comfy-status        Show ComfyUI backend configuration and installed models
   login               Authenticate Claude Code for this project
   trust               Mark /workspace trusted for headless runs (sets the flag in the Claude volume)
   exec <cmd>          Run a command in the running sandbox
@@ -2706,6 +3134,8 @@ case "${1:-help}" in
     ollama)         shift; cmd_ollama "$@" ;;
     llm)            shift; cmd_llm "$@" ;;
     spark-status)   shift; cmd_spark_status "$@" ;;
+    comfy)          shift; cmd_comfy "$@" ;;
+    comfy-status)   shift; cmd_comfy_status "$@" ;;
     login)          cmd_login ;;
     trust)          cmd_trust ;;
     exec)           cmd_exec "$@" ;;

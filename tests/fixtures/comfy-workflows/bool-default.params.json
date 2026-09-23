@@ -1,0 +1,7 @@
+{
+  "description": "Fixture for a manifest default of false over a graph value of true",
+  "tags": ["booldefault"],
+  "params": {
+    "flag": { "path": "1.inputs.flag", "type": "bool", "default": false }
+  }
+}

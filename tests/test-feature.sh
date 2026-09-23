@@ -14,9 +14,16 @@ echo "=== Testing feature: $FEATURE ==="
 
 # Build test image
 TAG="sandbox-feature-test-${FEATURE}"
+
+ASSET_COPY=""
+if [ -d "$SCRIPT_DIR/features/${FEATURE}.d" ]; then
+    ASSET_COPY="COPY features/${FEATURE}.d/ /tmp/${FEATURE}.d/"
+fi
+
 docker build -t "$TAG" -f - "$SCRIPT_DIR" <<DOCKER
 FROM sandbox-base:latest
 USER root
+${ASSET_COPY}
 COPY features/${FEATURE}.sh /tmp/${FEATURE}.sh
 RUN chmod +x /tmp/${FEATURE}.sh && /tmp/${FEATURE}.sh
 DOCKER

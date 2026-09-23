@@ -22,6 +22,18 @@ jobs:
       - name: Syntax check CLI
         run: bash -n cli/sandbox
 
+      - name: Syntax check entrypoint scripts and the comfy helper
+        run: bash -n base/entrypoint.sh base/init-firewall.sh features/comfyui.d/comfy
+
+      # These two need neither Docker nor the base image, so they run first
+      # for fast feedback. test-comfy-helper drives the comfy helper against a
+      # stub ComfyUI written in python3 (present on ubuntu-latest).
+      - name: Test feature asset staging
+        run: tests/test-build-assets.sh
+
+      - name: Test comfy helper (stub ComfyUI)
+        run: tests/test-comfy-helper.sh
+
       - name: Build base image
         run: cli/sandbox build-base
 
@@ -58,6 +70,9 @@ jobs:
       - name: Test config trust
         run: tests/test-config-trust.sh
 
+      - name: Test ComfyUI backend (discovery, argument wiring)
+        run: tests/test-comfy.sh
+
       - name: Test CLI integration (start, exec, stop lifecycle)
         run: tests/test-cli-integration.sh
 
@@ -66,3 +81,9 @@ jobs:
 
       - name: Test integration (python + llm)
         run: tests/test-integration.sh
+
+      # Skips with a stated reason when no live ComfyUI container is present,
+      # which is always the case on a hosted runner. Kept so the step runs
+      # for real on a self-hosted runner with a GPU.
+      - name: Test ComfyUI end to end
+        run: tests/test-comfy-e2e.sh

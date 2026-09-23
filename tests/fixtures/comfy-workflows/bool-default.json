@@ -1,0 +1,6 @@
+{
+  "1": {
+    "class_type": "StubBoolNode",
+    "inputs": { "flag": true, "text": "unchanged" }
+  }
+}
