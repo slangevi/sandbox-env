@@ -40,6 +40,11 @@ jobs:
       - name: Test base image
         run: tests/test-base.sh
 
+      # The strict firewall must reach the host at host.docker.internal from a
+      # joined network (features: [comfyui]); needs NET_ADMIN and host python3.
+      - name: Test firewall host alias on a joined network
+        run: tests/test-firewall-host-alias.sh
+
       - name: Test CLI commands
         run: tests/test-cli.sh
 

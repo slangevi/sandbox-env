@@ -40,6 +40,7 @@ bash -n cli/sandbox
 
 # Test firewall (requires Docker NET_ADMIN capability, may be slow)
 tests/test-firewall.sh
+tests/test-firewall-host-alias.sh   # host.docker.internal reachable from a joined (comfyui) network; needs host python3
 ```
 
 Tests require Docker running. Each test builds/runs/cleans its own containers. `test-integration.sh` is the slowest (~2-3 min, builds python+llm features). `tests/test-spark.sh` additionally requires host `python3` — it's the only test that runs a local stub gateway (`http.server`) instead of the real sparkyard stack.

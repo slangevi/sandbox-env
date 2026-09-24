@@ -103,12 +103,25 @@ while read -r domain; do
     done <<< "$ips"
 done < <(collect_domains | sort -u)
 
-# 8. Allow host gateway (for Docker host communication)
+# 8. Allow the Docker host: at the default route's gateway, and at the address
+# `host.docker.internal` resolves to when the CLI added that alias (the spark
+# backend points ANTHROPIC_BASE_URL at it). The two differ once the sandbox has
+# joined a non-default network — every features: [comfyui] project joins the
+# ComfyUI compose network — because Docker's host-gateway is always the default
+# bridge's gateway while the route's gateway is the joined network's. Both are
+# this host; allowing only the route's gateway rejected every model request
+# from a comfyui project with "connection refused".
+allow_host() {   # allow_host <ipv4> <label>
+    [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
+    echo "Allowing $2: $1"
+    iptables -A INPUT -s "$1" -j ACCEPT
+    iptables -A OUTPUT -d "$1" -j ACCEPT
+}
 HOST_IP=$(ip route | grep default | awk '{print $3}')
-if [ -n "$HOST_IP" ]; then
-    echo "Allowing host gateway: $HOST_IP"
-    iptables -A INPUT -s "$HOST_IP" -j ACCEPT
-    iptables -A OUTPUT -d "$HOST_IP" -j ACCEPT
+ALIAS_IP=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}' || true)
+allow_host "$HOST_IP" "host gateway"
+if [ -n "$ALIAS_IP" ] && [ "$ALIAS_IP" != "$HOST_IP" ]; then
+    allow_host "$ALIAS_IP" "host alias host.docker.internal"
 fi
 
 # 8b. Replace broad DNS rule with restricted resolver-only rule
