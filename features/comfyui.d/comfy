@@ -93,6 +93,38 @@ assert_api_format() {
         || die "$wf is not a ComfyUI API-format workflow (expected node id -> {class_type, inputs})" "$EX_USAGE"
 }
 
+# --workflow on the wrappers: a library NAME only, and it must carry the
+# wrapper's tag. The wrappers are on the approval gate's allowlist while
+# `comfy run` is not, so a path — or a name that climbs out of the library —
+# would let an agent run a workflow it wrote itself without a human "yes".
+workflow_by_name() {
+    local tag="$1" name="$2" wf mf
+    case "$name" in
+        ''|.*|*/*) die "--workflow takes a library name (see 'comfy workflows'), not a path: '$name'" "$EX_USAGE" ;;
+    esac
+    wf="$COMFY_WORKFLOWS/$name.json"
+    mf=$(manifest_path "$wf")
+    if [ ! -f "$wf" ]; then
+        die "no workflow '$name'. Workflows tagged '$tag':
+$(tagged_workflow_names "$tag" | sed 's/^/  /')" "$EX_USAGE"
+    fi
+    if [ ! -f "$mf" ] || ! jq -e --arg t "$tag" '(.tags // []) | index($t)' "$mf" >/dev/null 2>&1; then
+        die "workflow '$name' is not tagged '$tag'. Workflows tagged '$tag':
+$(tagged_workflow_names "$tag" | sed 's/^/  /')" "$EX_USAGE"
+    fi
+    printf '%s' "$wf"
+}
+
+tagged_workflow_names() {
+    local tag="$1" name mf
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        mf=$(manifest_path "$COMFY_WORKFLOWS/$name.json")
+        [ -f "$mf" ] && jq -e --arg t "$tag" '(.tags // []) | index($t)' "$mf" >/dev/null 2>&1 \
+            && printf '%s\n' "$name"
+    done < <(list_workflow_names)
+}
+
 workflow_for_tag() {
     local tag="$1" name wf mf best=""
     while IFS= read -r name; do
@@ -559,9 +591,10 @@ cmd_workflows() {
 generate() {
     local tag="$1"; shift
     local out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
-    local sets=()
+    local sets=() wf_name=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --workflow)   require_arg --workflow "${2:-}";   wf_name="$2"; shift 2 ;;
             --prompt)     require_arg --prompt "${2:-}";     sets+=("prompt=$2"); shift 2 ;;
             --negative)   require_arg --negative "${2:-}";   sets+=("negative=$2"); shift 2 ;;
             --checkpoint) require_arg --checkpoint "${2:-}"; sets+=("checkpoint=$2"); shift 2 ;;
@@ -596,7 +629,11 @@ generate() {
     done
     require_numeric_timeout "$timeout"
     local wf
-    wf=$(workflow_for_tag "$tag") || exit $?
+    if [ -n "$wf_name" ]; then
+        wf=$(workflow_by_name "$tag" "$wf_name") || exit $?
+    else
+        wf=$(workflow_for_tag "$tag") || exit $?
+    fi
     # Always waits: --no-wait is a `comfy run` flag (see the spec's command
     # table). txt2img/video are the convenience wrappers, and their whole
     # value is "one command, files on disk".
@@ -797,6 +834,8 @@ comfy — generate images and video through a ComfyUI instance
       [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
       [--width N] [--height N] [--out DIR] [--json]
   comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+      [--workflow NAME]             txt2img/video/edit: use this library workflow
+                                    instead of the default (it must carry the tag)
       [--duration S] [--fps N] [--frames N]   whichever the workflow exposes
   comfy edit --image FILE --prompt TEXT       edit an image (workflow tagged "edit")
                                     FILE: a local file (uploaded for you) or a
