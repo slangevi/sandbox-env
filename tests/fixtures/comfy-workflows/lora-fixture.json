@@ -1,0 +1,7 @@
+{
+  "4": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors" } },
+  "10": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["4", 0], "lora_name": "none.safetensors", "strength_model": 0.8 } },
+  "11": { "class_type": "LoraLoaderModelOnly", "inputs": { "model": ["10", 0], "lora_name": "none.safetensors", "strength_model": 0.8 } },
+  "6": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["4", 1] } },
+  "9": { "class_type": "SaveImage", "inputs": { "filename_prefix": "lora-fixture", "images": ["11", 0] } }
+}

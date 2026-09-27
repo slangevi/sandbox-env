@@ -726,6 +726,14 @@ workflow the agent wrote into its own workspace. `comfy edit --image`
 accepts a local file — it is uploaded to ComfyUI's input directory first and
 the stored name is what the graph sees — or a name already uploaded.
 
+**Trigger words.** A manifest may carry a `triggers` block mapping parameter
+values to words another parameter must contain, typically a LoRA file to the
+trigger words that make it take effect:
+`"triggers": {"into": "prompt", "from": ["lora1", "lora2"], "words": {"<file>": "<words>"}}`.
+After all `--set` values and defaults are applied, the helper prepends the
+words for each `from` value to `into` (slot order, skipping words already
+present, case-insensitively) and reports what it added on stderr.
+
 **Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
 id and returns immediately — nothing is polled and nothing is downloaded. Pick
 it up whenever it finishes:

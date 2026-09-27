@@ -352,6 +352,33 @@ find_supplied() {
     return 1
 }
 
+# A manifest may map parameter VALUES to words that must appear in another
+# parameter -- typically a LoRA file to its trigger words, which the model
+# needs in the prompt for the LoRA to take effect:
+#   "triggers": {"into": "prompt", "from": ["lora1", "lora2"],
+#                "words": {"<lora file>": "<trigger words>"}}
+# After every --set and default is applied, the words of each `from` value
+# are prepended to `into` (slot order, skipping words the text already has,
+# case-insensitively), and the addition is reported on stderr.
+apply_triggers() {
+    local graph="$1" mf="$2" added
+    [ -f "$mf" ] && jq -e '.triggers.into and .triggers.words' "$mf" >/dev/null 2>&1 \
+        || { printf '%s' "$graph"; return 0; }
+    # The words to add, in slot order, deduplicated, minus any the text has.
+    added=$(jq -r --argjson g "$graph" '
+        . as $mf | .triggers as $t |
+        def val($k): $g | getpath($mf.params[$k].path | split(".")) // "";
+        (val($t.into) | ascii_downcase) as $text |
+        reduce (($t.from // [])[] | $t.words[val(.)] // empty) as $w
+            ([]; if index([$w]) or ($text | contains($w | ascii_downcase)) then . else . + [$w] end)
+        | join(", ")' "$mf") || return 1
+    if [ -z "$added" ]; then printf '%s' "$graph"; return 0; fi
+    printf 'comfy: added trigger words: %s\n' "$added" >&2
+    jq -c --argjson g "$graph" --arg add "$added" '
+        (.params[.triggers.into].path | split(".")) as $p |
+        $g | setpath($p; $add + ". " + (getpath($p) // ""))' "$mf"
+}
+
 # run_workflow <workflow> <outdir> <timeout> <json:0|1> <wait:0|1> [key=value ...]
 # With <wait> 0 the job is submitted and its prompt id reported, and neither
 # wait_for_job nor download_outputs runs — `comfy job` and `comfy fetch` pick
@@ -470,6 +497,7 @@ $(jq -r 'keys | join(", ")' "$wf" | sed 's/^/  /')" "$EX_USAGE"
             find_supplied "$dkey" "$dpath" "$@" >/dev/null \
                 || die "'$dkey' is required by $(basename "$mf"). Add --set $dkey=..." "$EX_USAGE"
         done <<<"$missing"
+        graph=$(apply_triggers "$graph" "$mf") || exit $?
     fi
 
     start=$SECONDS

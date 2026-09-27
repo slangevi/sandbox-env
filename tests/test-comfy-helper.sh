@@ -524,6 +524,23 @@ check_output "--workflow is guarded" "--workflow needs a value" "$COMFY" video -
 check_output "txt2img accepts --workflow too" "^a pear$" \
     sh -c '"$1" txt2img --workflow minimal-txt2img --prompt "a pear" --out "$2" >/dev/null 2>&1; jq -r ".prompt[\"6\"].inputs.text" "$3"' _ "$COMFY" "$TMP/wa6" "$TMP/last-prompt.json"
 
+echo "-- manifest triggers: LoRA trigger words reach the prompt --"
+P6() { jq -r '.prompt["6"].inputs.text' "$TMP/last-prompt.json"; }
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --out "$TMP/tr1" >/dev/null 2>&1
+check_output "a set LoRA's trigger words are prepended" "^ALPHA\. a cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --set lora2=beta.safetensors --out "$TMP/tr2" >/dev/null 2>&1
+check_output "two LoRAs: both, in slot order" "^ALPHA, beta style\. a cat$" P6
+"$COMFY" run lora-fixture --set prompt="an Alpha cat" --set lora1=alpha.safetensors --out "$TMP/tr3" >/dev/null 2>&1
+check_output "words already in the prompt (any case) are not added again" "^an Alpha cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --out "$TMP/tr4" >/dev/null 2>&1
+check_output "no LoRA set: the prompt is untouched" "^a cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=gamma.safetensors --out "$TMP/tr5" >/dev/null 2>&1
+check_output "a LoRA with no trigger entry adds nothing" "^a cat$" P6
+check_output "the addition is reported, so the agent knows" "added trigger words: ALPHA" \
+    "$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --out "$TMP/tr6"
+"$COMFY" run minimal-txt2img --set prompt="a cat" --out "$TMP/tr7" >/dev/null 2>&1
+check_output "a manifest without triggers is unaffected" "^a cat$" P6
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

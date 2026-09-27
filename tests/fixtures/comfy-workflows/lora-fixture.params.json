@@ -1,0 +1,14 @@
+{
+  "description": "Fixture: two LoRA slots whose trigger words the helper prepends to the prompt.",
+  "tags": [],
+  "params": {
+    "prompt": { "path": "6.inputs.text",        "type": "string", "required": true },
+    "lora1":  { "path": "10.inputs.lora_name",  "type": "string" },
+    "lora2":  { "path": "11.inputs.lora_name",  "type": "string" }
+  },
+  "triggers": {
+    "into": "prompt",
+    "from": ["lora1", "lora2"],
+    "words": { "alpha.safetensors": "ALPHA", "beta.safetensors": "beta style" }
+  }
+}
