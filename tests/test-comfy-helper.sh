@@ -215,6 +215,15 @@ echo "-- failure paths --"
 curl -sS -X POST "$COMFYUI_URL/_stub/pending" >/dev/null
 check_output "timeout names the fetch escape hatch" "comfy fetch" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out7" --timeout 2
+# COMFY_JOB_TIMEOUT below an agent's tool timeout turns one long render into a
+# loop of short calls; the message must hand over the exact next command, and
+# `comfy job ID --wait` comes first because `fetch` refuses a job still running.
+check_output "timeout names 'comfy job ID --wait' to keep waiting" "comfy job stub-prompt-[0-9]* --wait" \
+    "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out7b" --timeout 2
+check_output "COMFY_JOB_TIMEOUT sets the wrappers' wait" "timed out after 2s" \
+    env COMFY_JOB_TIMEOUT=2 "$COMFY" txt2img --prompt x --out "$TMP/out7c"
+check_output "...and job --wait's" "timed out after 2s" \
+    timeout 10 env COMFY_JOB_TIMEOUT=2 "$COMFY" job stub-prompt-1 --wait
 # Interrupt mid-poll: the job id must survive into the message.
 ( "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/outint" --timeout 60 >/dev/null 2>"$TMP/int.err" &
   RUNPID=$!; sleep 3; kill -INT "$RUNPID" 2>/dev/null; wait "$RUNPID" 2>/dev/null ) || true

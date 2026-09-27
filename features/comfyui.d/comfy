@@ -259,7 +259,9 @@ $detail" "$EX_EXEC" ;;
         esac
         if [ "$waited" -ge "$timeout" ]; then
             die "timed out after ${timeout}s waiting for $pid.
-  The job may still be running on the GPU. Retrieve it with:
+  The job is still queued or running in ComfyUI. Keep waiting with:
+    comfy job $pid --wait
+  and once it reports success, download it with:
     comfy fetch $pid" "$EX_TIMEOUT"
         fi
         sleep 2
