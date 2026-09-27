@@ -361,22 +361,28 @@ find_supplied() {
 # are prepended to `into` (slot order, skipping words the text already has,
 # case-insensitively), and the addition is reported on stderr.
 apply_triggers() {
-    local graph="$1" mf="$2" added
-    [ -f "$mf" ] && jq -e '.triggers.into and .triggers.words' "$mf" >/dev/null 2>&1 \
-        || { printf '%s' "$graph"; return 0; }
-    # The words to add, in slot order, deduplicated, minus any the text has.
-    added=$(jq -r --argjson g "$graph" '
-        . as $mf | .triggers as $t |
-        def val($k): $g | getpath($mf.params[$k].path | split(".")) // "";
-        (val($t.into) | ascii_downcase) as $text |
-        reduce (($t.from // [])[] | $t.words[val(.)] // empty) as $w
-            ([]; if index([$w]) or ($text | contains($w | ascii_downcase)) then . else . + [$w] end)
-        | join(", ")' "$mf") || return 1
-    if [ -z "$added" ]; then printf '%s' "$graph"; return 0; fi
-    printf 'comfy: added trigger words: %s\n' "$added" >&2
-    jq -c --argjson g "$graph" --arg add "$added" '
-        (.params[.triggers.into].path | split(".")) as $p |
-        $g | setpath($p; $add + ". " + (getpath($p) // ""))' "$mf"
+    local graph="$1" mf="$2" res added
+    [ -f "$mf" ] && jq -e '.triggers // empty | if type == "array" then length > 0 else (.into and .words) end' \
+        "$mf" >/dev/null 2>&1 || { printf '%s' "$graph"; return 0; }
+    # Each block (one object, or a list of them) prepends to its own `into`:
+    # the words of its `from` values, in slot order, deduplicated, minus any
+    # the text already has.
+    res=$(jq -c --argjson g "$graph" '
+        . as $mf |
+        def pathof($k): $mf.params[$k].path | split(".");
+        reduce (.triggers | if type == "array" then .[] else . end) as $t
+            ({graph: $g, added: []};
+             .graph as $cur |
+             (($cur | getpath(pathof($t.into))) // "") as $text |
+             (reduce (($t.from // [])[] as $k | (($cur | getpath(pathof($k))) // "") as $v | $t.words[$v] // empty) as $w
+                 ([]; if index([$w]) or ($text | ascii_downcase | contains($w | ascii_downcase)) then . else . + [$w] end)) as $add |
+             if ($add | length) > 0
+             then .graph |= setpath(pathof($t.into); ($add | join(", ")) + ". " + $text)
+                  | .added += [($add | join(", "))]
+             else . end)' "$mf") || return 1
+    added=$(jq -r '.added | join("; ")' <<<"$res")
+    [ -n "$added" ] && printf 'comfy: added trigger words: %s\n' "$added" >&2
+    jq -c '.graph' <<<"$res"
 }
 
 # run_workflow <workflow> <outdir> <timeout> <json:0|1> <wait:0|1> [key=value ...]

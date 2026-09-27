@@ -732,7 +732,8 @@ trigger words that make it take effect:
 `"triggers": {"into": "prompt", "from": ["lora1", "lora2"], "words": {"<file>": "<words>"}}`.
 After all `--set` values and defaults are applied, the helper prepends the
 words for each `from` value to `into` (slot order, skipping words already
-present, case-insensitively) and reports what it added on stderr.
+present, case-insensitively) and reports what it added on stderr. `triggers` may also be a list of such
+blocks, one per prompt (e.g. two chained segments, each with its own LoRA).
 
 **Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
 id and returns immediately — nothing is polled and nothing is downloaded. Pick

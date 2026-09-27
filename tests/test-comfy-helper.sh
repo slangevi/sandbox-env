@@ -541,6 +541,15 @@ check_output "the addition is reported, so the agent knows" "added trigger words
 "$COMFY" run minimal-txt2img --set prompt="a cat" --out "$TMP/tr7" >/dev/null 2>&1
 check_output "a manifest without triggers is unaffected" "^a cat$" P6
 
+echo "-- manifest triggers: a list of blocks, one per prompt --"
+P7() { jq -r '.prompt["7"].inputs.text' "$TMP/last-prompt.json"; }
+"$COMFY" run two-prompt-fixture --set prompt="first" --set prompt2="second" --set lora1=alpha.safetensors --set lora2=beta.safetensors --out "$TMP/tb1" >/dev/null 2>&1
+check_output "block 1 feeds its own prompt" "^ALPHA\. first$" P6
+check_output "block 2 feeds its own prompt" "^beta style\. second$" P7
+"$COMFY" run two-prompt-fixture --set prompt="first" --set prompt2="second" --set lora1=alpha.safetensors --out "$TMP/tb2" >/dev/null 2>&1
+check_output "a block whose LoRA is unset leaves its prompt alone" "^second$" P7
+check_output "...while the other block still applies" "^ALPHA\. first$" P6
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
