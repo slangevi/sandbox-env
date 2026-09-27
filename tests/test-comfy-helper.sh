@@ -550,6 +550,31 @@ check_output "block 2 feeds its own prompt" "^beta style\. second$" P7
 check_output "a block whose LoRA is unset leaves its prompt alone" "^second$" P7
 check_output "...while the other block still applies" "^ALPHA\. first$" P6
 
+echo "-- frame: grab one frame of a video --"
+printf 'not really an mp4' > "$TMP/clip.mp4"
+rm -f "$TMP/last-prompt.json"
+check_output "frame prints the saved image" "comfy-out\|\.png" \
+    "$COMFY" frame "$TMP/clip.mp4" --out "$TMP/fr1"
+check_output "a local video is uploaded first" "not really an mp4" cat "$TMP/last-upload.raw"
+check_output "...and the graph loads the name ComfyUI stored it under" "^uploaded.png$" \
+    jq -r '[.prompt[] | select(.class_type=="LoadVideo")][0].inputs.file' "$TMP/last-prompt.json"
+check_output "the default is the last frame" "^16384$" \
+    jq -r '[.prompt[] | select(.class_type=="ImageFromBatch")][0].inputs.batch_index' "$TMP/last-prompt.json"
+"$COMFY" frame "$TMP/clip.mp4" --index 5 --out "$TMP/fr2" >/dev/null 2>&1
+check_output "--index picks a frame (0-based)" "^5$" \
+    jq -r '[.prompt[] | select(.class_type=="ImageFromBatch")][0].inputs.batch_index' "$TMP/last-prompt.json"
+check_output "--index must be a non-negative integer" "must be a non-negative integer" \
+    "$COMFY" frame "$TMP/clip.mp4" --index -3 --out "$TMP/fr3"
+check_status "...exiting 1" 1 "$COMFY" frame "$TMP/clip.mp4" --index abc --out "$TMP/fr3"
+"$COMFY" frame already-there.mp4 --out "$TMP/fr4" >/dev/null 2>&1
+check_output "a name that is not a local file is used as-is" "^already-there.mp4$" \
+    jq -r '[.prompt[] | select(.class_type=="LoadVideo")][0].inputs.file' "$TMP/last-prompt.json"
+"$COMFY" frame "$TMP/clip.mp4" --out "$TMP/fr5" >/dev/null 2>&1
+check_status "the loaded video is not downloaded back" 1 test -e "$TMP/fr5/input-echo.mp4"
+check_status "...while the frame is" 0 test -e "$TMP/fr5/ComfyUI_00001_.png"
+check_output "no video gives a usage message" "usage: comfy frame" "$COMFY" frame
+check_output "--index is guarded" "--index needs a value" "$COMFY" frame "$TMP/clip.mp4" --index
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

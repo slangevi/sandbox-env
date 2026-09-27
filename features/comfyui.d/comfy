@@ -323,8 +323,11 @@ download_outputs() {
             die "downloaded $safe from $COMFYUI_URL but it is empty" "$EX_UNREACHABLE"
         fi
         printf '%s\n' "$dest"
-    done < <(jq -c --arg id "$pid" '
-        .[$id].outputs // {} | to_entries[] | .value | to_entries[] | .value
+    # OUTPUT_NODE_ONLY (set by cmd_frame) restricts the download to one output
+    # node: ComfyUI also reports a LoadVideo node's input as an output.
+    done < <(jq -c --arg id "$pid" --arg only "${OUTPUT_NODE_ONLY:-}" '
+        .[$id].outputs // {} | to_entries[] | select($only == "" or .key == $only)
+        | .value | to_entries[] | .value
         | if type == "array" then .[] else empty end
         # .filename must actually be a string — a null (or missing, which
         # also types as null) used to render as an empty @tsv field and get
@@ -680,6 +683,46 @@ cmd_txt2img() { require_url; generate txt2img "$@"; }
 cmd_video()   { require_url; generate video "$@"; }
 cmd_edit()    { require_url; generate edit "$@"; }
 
+# comfy frame VIDEO [--index N] — save one frame of a video as a PNG, through
+# ComfyUI itself (LoadVideo -> GetVideoComponents -> ImageFromBatch ->
+# SaveImage), so the sandbox needs no video tooling of its own. The default is
+# the last frame, which is what chaining a clip onto the next one needs.
+# ImageFromBatch clamps an index past the end to the last frame.
+cmd_frame() {
+    require_url
+    [ $# -gt 0 ] || die "usage: comfy frame VIDEO [--index N] [--out DIR] [--json]
+  VIDEO: a local file (uploaded for you) or a name already in ComfyUI's input directory" "$EX_USAGE"
+    local video="$1"; shift
+    local index=16384 out="./comfy-out" timeout="${COMFY_JOB_TIMEOUT:-600}" want_json=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --index)   require_arg --index "${2:-}";   index="$2"; shift 2 ;;
+            --out)     require_arg --out "${2:-}";     out="$2"; shift 2 ;;
+            --timeout) require_arg --timeout "${2:-}"; timeout="$2"; shift 2 ;;
+            --json)    want_json=1; shift ;;
+            *)         die "unknown option '$1'" "$EX_USAGE" ;;
+        esac
+    done
+    [[ "$index" =~ ^[0-9]+$ ]] || die "--index must be a non-negative integer (got '$index')" "$EX_USAGE"
+    require_numeric_timeout "$timeout"
+    local name="$video" body
+    if [ -f "$video" ]; then
+        body=$(upload_image "$video" "$(basename -- "$video")") || exit $?
+        name=$(jq -r '.name' <<<"$body")
+        printf 'comfy: uploaded %s as %s\n' "$video" "$name" >&2
+    fi
+    local graph_file
+    graph_file=$(mktemp "${TMPDIR:-/tmp}/comfy-frame.XXXXXX.json")
+    # shellcheck disable=SC2064
+    trap "rm -f '$graph_file'" EXIT
+    jq -n --arg f "$name" --argjson i "$index" '{
+        "1": {class_type: "LoadVideo", inputs: {file: $f}},
+        "2": {class_type: "GetVideoComponents", inputs: {video: ["1", 0]}},
+        "3": {class_type: "ImageFromBatch", inputs: {image: ["2", 0], batch_index: $i, length: 1}},
+        "9": {class_type: "SaveImage", inputs: {images: ["3", 0], filename_prefix: "frame"}}}' > "$graph_file"
+    OUTPUT_NODE_ONLY=9 run_workflow "$graph_file" "$out" "$timeout" "$want_json" 1
+}
+
 # ── job control ──────────────────────────────────────────────────────
 
 cmd_job() {
@@ -884,6 +927,8 @@ comfy — generate images and video through a ComfyUI instance
   comfy job ID [--wait] [--json]    status of a queued job
   comfy fetch ID [--out DIR]        download a finished job's outputs
   comfy upload FILE [--name NAME]   upload an input image
+  comfy frame VIDEO [--index N]     save one frame of a video as a PNG (default:
+      [--out DIR] [--json]          the last frame, e.g. to start the next clip)
   comfy cancel [ID]                 with no ID, interrupt whatever is running;
                                     with one, interrupt it only if it is the
                                     running job, else just dequeue it
@@ -908,6 +953,7 @@ case "${1:-help}" in
     job)            shift; cmd_job "$@" ;;
     fetch)          shift; cmd_fetch "$@" ;;
     upload)         shift; cmd_upload "$@" ;;
+    frame)          shift; cmd_frame "$@" ;;
     cancel)         shift; cmd_cancel "$@" ;;
     help|-h|--help) usage ;;
     *)              printf 'comfy: unknown command: %s\n\n' "$1" >&2; usage >&2; exit "$EX_USAGE" ;;
