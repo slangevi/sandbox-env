@@ -835,6 +835,33 @@ check_output "llm --spark refuses to attach to an already-running container" "Ru
 
 docker rm -f sandbox-spark-argtest >/dev/null 2>&1 || true
 
+# ── job --spark ──────────────────────────────────────────────────────
+echo "-- job --spark --"
+
+check_output "job --spark wires the gateway URL" "ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT" \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+check_output "job --spark blanks ANTHROPIC_API_KEY" "ANTHROPIC_API_KEY= " \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+# The key is inherited from the CLI's environment: the argv carries the bare
+# name, never NAME=value (argv is readable by every user through ps).
+check_output "job --spark passes the token by name only" "-e ANTHROPIC_AUTH_TOKEN " \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+check_not_output "job --spark never puts the token value in argv" "ANTHROPIC_AUTH_TOKEN=" \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+check_not_output "job --spark never prints the key" "sk-dry-secret" \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+check_status "job --spark dry-run exits 0 (the path actually ran)" 0 \
+    run_dry job daily --spark qwen3-coder-next -- python3 -m tool run
+check_output "job --spark calls preflight" "gateway unreachable" \
+    run_unreachable job daily --spark qwen3-coder-next -- true
+check_output "job --spark is refused on a weakened firewall without the override" \
+    "weakens egress control" run_no_override job daily --spark qwen3-coder-next -- true
+check_output "job --spark validates the model name" "Invalid model name" \
+    run_dry job daily --spark 'bad;name' -- true
+# Control: the existing commands keep their form (the change is job-only).
+check_output "claude-spark still passes the (masked) token by value" "ANTHROPIC_AUTH_TOKEN=\*\*\*" \
+    run_dry claude-spark qwen3-coder-next
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

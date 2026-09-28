@@ -1035,7 +1035,15 @@ _apply_spark_backend() {
     esac
     DOCKER_ARGS+=("--add-host" "host.docker.internal:host-gateway")
     DOCKER_ARGS+=("-e" "ANTHROPIC_BASE_URL=$SPARK_URL")
-    DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=$SPARK_KEY")
+    # inherit: the key travels in the CLI's own environment and docker copies
+    # it into the container (`-e NAME` with no value). Anything in argv is
+    # readable by every user through ps — this key is a LiteLLM ADMIN key.
+    if [ "${1:-}" = "inherit" ]; then
+        export ANTHROPIC_AUTH_TOKEN="$SPARK_KEY"
+        DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN")
+    else
+        DOCKER_ARGS+=("-e" "ANTHROPIC_AUTH_TOKEN=$SPARK_KEY")
+    fi
 }
 
 # Runs docker, or prints the invocation when SANDBOX_DRY_RUN=1.
@@ -1724,6 +1732,15 @@ cmd_job() {
     for kv in ${run_env[@]+"${run_env[@]}"}; do
         DOCKER_ARGS+=("-e" "$kv")
     done
+
+    if [ -n "$spark_model" ]; then
+        _load_spark_env
+        _spark_guard_firewall
+        validate_model "$spark_model"
+        _spark_preflight "$spark_model"
+        _apply_spark_backend inherit
+        DOCKER_ARGS+=("-e" "ANTHROPIC_API_KEY=")
+    fi
 
     _spark_run run "${DOCKER_ARGS[@]}" "sandbox-${name}:latest" "${cmd[@]}"
 }
