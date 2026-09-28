@@ -9,7 +9,7 @@ PASS=0
 FAIL=0
 TMP=$(mktemp -d)
 cleanup() {
-    docker rm -f sandbox-job-test-t sandbox-job-test-slow sandbox-job-strict-t >/dev/null 2>&1 || true
+    docker rm -f sandbox-job-test-t sandbox-job-test-slow sandbox-job-test-clash sandbox-job-strict-t >/dev/null 2>&1 || true
     docker image rm sandbox-job-test:latest sandbox-job-strict:latest >/dev/null 2>&1 || true
     # _build_docker_args creates the projects' named volumes on first use.
     docker volume ls -q | grep -E '^sandbox-job-(test|strict)-' | xargs -r docker volume rm >/dev/null 2>&1 || true
@@ -120,6 +120,47 @@ check_status "strict job cannot reach a non-allowed host" 7 \
     sjob t -- bash -c 'curl --connect-timeout 5 -sf https://example.com >/dev/null && exit 0 || exit 7'
 check_status "strict job reaches an allowlisted host" 0 \
     sjob t -- bash -c 'curl --connect-timeout 10 -sf https://api.github.com >/dev/null'
+
+
+echo "-- review fixes --"
+# --env must not override a key the committed sandbox.yaml sets (validated
+# after the config is loaded, as cmd_run does).
+PROJ_ENV="$TMP/proj-env"
+mkdir -p "$PROJ_ENV"
+cat > "$PROJ_ENV/sandbox.yaml" <<'YAML'
+name: job-test
+firewall: open
+env:
+  FOO: committed
+YAML
+check_output "--env may not override a committed key" "already set in sandbox.yaml" \
+    bash -c "cd '$PROJ_ENV' && SANDBOX_DRY_RUN=1 '$SANDBOX' job t --env FOO=override -- true"
+check_status "...exit 1" 1 bash -c "cd '$PROJ_ENV' && SANDBOX_DRY_RUN=1 '$SANDBOX' job t --env FOO=override -- true"
+
+# Job containers carry an ownership label, so another project whose name
+# happens to be <name>-<suffix> can neither stop the job nor be mistaken for it.
+check_output "job containers are labelled with their owner" "--label sandbox.job=job-test/t " dry t -- true
+(cd "$PROJ" && "$SANDBOX" job slow -- sleep 60) >/dev/null 2>&1 &
+for _ in $(seq 1 30); do
+    [ "$(docker container inspect --format '{{.State.Running}}' sandbox-job-test-slow 2>/dev/null)" = "true" ] && break
+    sleep 1
+done
+PROJ_CLASH="$TMP/proj-clash"
+mkdir -p "$PROJ_CLASH"
+printf 'name: job-test-slow\nfirewall: open\n' > "$PROJ_CLASH/sandbox.yaml"
+(cd "$PROJ_CLASH" && "$SANDBOX" stop) >/dev/null 2>&1 || true
+if [ "$(docker container inspect --format '{{.State.Running}}' sandbox-job-test-slow 2>/dev/null)" = "true" ]; then
+    echo "  PASS: a project named <name>-<suffix> cannot stop the job"; PASS=$((PASS + 1))
+else
+    echo "  FAIL: project job-test-slow's stop killed job-test's job"; FAIL=$((FAIL + 1))
+fi
+docker rm -f sandbox-job-test-slow >/dev/null 2>&1 || true
+wait || true
+docker run -d --rm --name sandbox-job-test-clash --entrypoint sleep sandbox-job-test:latest 60 >/dev/null
+check_output "a same-named container that is not this job is a collision, not 'already running'" \
+    "not a job of this project" job clash -- true
+check_status "...exit 1, not 75" 1 job clash -- true
+docker rm -f sandbox-job-test-clash >/dev/null 2>&1 || true
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -105,8 +105,11 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
   Matrix bridge) can coexist with the interactive container and be stopped
   without touching it. Volumes are always the project's. `cmd_stop` stops both
   names. `cmd_job <suffix>` uses `sandbox-<name>-<suffix>` (`headless` refused)
-  and refuses with exit 75 when that container is already running; `cmd_stop`
-  does not touch job containers.
+  and labels it `sandbox.job=<name>/<suffix>`. It refuses with exit 75 when its
+  own job is already running, and with exit 1 when a same-named container is
+  someone else's (another project named `<name>-<suffix>`). `cmd_stop` skips any
+  container carrying that label. `--env` is validated after `find_config`, so a
+  job cannot override a committed `env:` key either.
 - **Config tamper protection**: `_build_docker_args` overlays the resolved
   `sandbox.yaml`/`.yml` with a read-only file bind over every container path
   that exposes it (default `/workspace` mount and each ancestor-matching

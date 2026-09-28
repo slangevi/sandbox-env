@@ -1654,6 +1654,14 @@ cmd_run() {
     fi
 }
 
+# The sandbox.job label ("<project>/<suffix>") of a container, or "" if none.
+_job_label() {
+    local v
+    v=$(docker container inspect --format '{{index .Config.Labels "sandbox.job"}}' "$1" 2>/dev/null) || v=""
+    [ "$v" = "<no value>" ] && v=""
+    printf '%s' "$v"
+}
+
 # sandbox job <suffix> [--spark <model>] [--env KEY=VALUE]... -- <cmd>...
 # A non-interactive command in the project image with the full
 # _build_docker_args treatment — strict firewall, mounts, config tamper
@@ -1698,7 +1706,8 @@ cmd_job() {
                     error "--env expects KEY=VALUE."
                     exit 1
                 fi
-                validate_run_env "$2"
+                # Validated after find_config: validate_run_env refuses keys
+                # the committed sandbox.yaml sets, which needs the config.
                 run_env+=("$2")
                 shift 2 ;;
             *)
@@ -1728,15 +1737,24 @@ cmd_job() {
     local container="sandbox-${name}-${suffix}"
     # A timer can fire while yesterday's run is still going: refuse distinctly
     # (75, EX_TEMPFAIL) instead of Docker's generic name conflict (125), so a
-    # runner can tell "skipped" from "broken".
+    # runner can tell "skipped" from "broken". The ownership label tells this
+    # job apart from another project whose name happens to be <name>-<suffix>.
+    local owner="${name}/${suffix}"
     if [ "$(docker container inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" = "true" ]; then
-        error "${container} is already running; not starting a second one."
-        exit 75
+        if [ "$(_job_label "$container")" = "$owner" ]; then
+            error "${container} is already running; not starting a second one."
+            exit 75
+        fi
+        error "${container} is running but is not a job of this project (another project's container has that name); pick another job name."
+        exit 1
     fi
     _build_docker_args "$name" "$container"
 
+    DOCKER_ARGS+=("--label" "sandbox.job=${owner}")
+
     local kv
     for kv in ${run_env[@]+"${run_env[@]}"}; do
+        validate_run_env "$kv"
         DOCKER_ARGS+=("-e" "$kv")
     done
 
@@ -2842,6 +2860,11 @@ cmd_stop() {
     log "Stopping sandbox-${name}..."
     local c
     for c in "sandbox-${name}" "sandbox-${name}-headless"; do
+        # A job container (labelled by cmd_job) is never this project's session,
+        # even when another project's <name>-<suffix> spells this name.
+        if [ -n "$(_job_label "$c")" ]; then
+            continue
+        fi
         if [ "$(docker container inspect --format '{{.State.Running}}' "$c" 2>/dev/null)" = "true" ]; then
             docker stop "$c" >/dev/null 2>&1 || true
             if [ "$c" = "sandbox-${name}-headless" ]; then
