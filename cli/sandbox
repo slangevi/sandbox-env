@@ -1646,6 +1646,88 @@ cmd_run() {
     fi
 }
 
+# sandbox job <suffix> [--spark <model>] [--env KEY=VALUE]... -- <cmd>...
+# A non-interactive command in the project image with the full
+# _build_docker_args treatment — strict firewall, mounts, config tamper
+# protection — for scheduled runners such as a daily systemd timer.
+# Container sandbox-<name>-<suffix>, so a job never collides with the
+# interactive sandbox or a headless (bridge) run, and cmd_stop leaves it alone.
+# The command's exit code is this command's exit code.
+cmd_job() {
+    local usage='Usage: sandbox job <suffix> [--spark <model>] [--env KEY=VALUE]... -- <command>...'
+    local suffix="${1:-}"
+    if [ -z "$suffix" ] || [ "${suffix#-}" != "$suffix" ]; then
+        error "$usage"
+        exit 1
+    fi
+    shift
+    if [[ ! "$suffix" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+        error "Invalid job name '$suffix'. Must match: ^[a-z0-9][a-z0-9._-]*\$"
+        exit 1
+    fi
+    if [ "$suffix" = "headless" ]; then
+        error "Job name 'headless' is reserved for headless runs; pick another."
+        exit 1
+    fi
+
+    local spark_model="" run_env=() cmd=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --)
+                shift
+                cmd=("$@")
+                break ;;
+            --spark)
+                if [ $# -lt 2 ] || [ "${2#-}" != "$2" ]; then
+                    error "--spark requires a model name."
+                    error "$usage"
+                    exit 1
+                fi
+                spark_model="$2"
+                shift 2 ;;
+            --env)
+                if [ $# -lt 2 ]; then
+                    error "--env expects KEY=VALUE."
+                    exit 1
+                fi
+                validate_run_env "$2"
+                run_env+=("$2")
+                shift 2 ;;
+            *)
+                error "Unknown option '$1' before '--'."
+                error "$usage"
+                exit 1 ;;
+        esac
+    done
+    if [ ${#cmd[@]} -eq 0 ]; then
+        error "sandbox job requires a command after '--'."
+        error "$usage"
+        exit 1
+    fi
+
+    find_config
+    local name
+    name=$(project_name)
+    if [ -z "$name" ]; then
+        error "sandbox.yaml must have a 'name' field."
+        exit 1
+    fi
+    if [ -z "$(docker image ls -q "sandbox-${name}:latest" 2>/dev/null)" ]; then
+        error "Project image not found. Run 'sandbox build' first."
+        exit 1
+    fi
+
+    local container="sandbox-${name}-${suffix}"
+    _build_docker_args "$name" "$container"
+
+    local kv
+    for kv in ${run_env[@]+"${run_env[@]}"}; do
+        DOCKER_ARGS+=("-e" "$kv")
+    done
+
+    _spark_run run "${DOCKER_ARGS[@]}" "sandbox-${name}:latest" "${cmd[@]}"
+}
+
 # Shared Claude config reader — sets CLAUDE_EXTRA_ARGS array and SKIP_PERMISSIONS_FLAG string
 _read_claude_config() {
     CLAUDE_EXTRA_ARGS=()
@@ -3103,6 +3185,7 @@ Commands:
   comfy-status        Show ComfyUI backend configuration and installed models
   login               Authenticate Claude Code for this project
   trust               Mark /workspace trusted for headless runs (sets the flag in the Claude volume)
+  job <suffix> -- <cmd>  Run a non-interactive command in the project image (container sandbox-<name>-<suffix>)
   exec <cmd>          Run a command in the running sandbox
   start               Start the sandbox in the background
   shell               Open a shell in the running sandbox
@@ -3125,6 +3208,7 @@ case "${1:-help}" in
     build-base)     cmd_build_base ;;
     build)          shift; cmd_build "$@" ;;
     run)            shift; cmd_run "$@" ;;
+    job)            shift; cmd_job "$@" ;;
     claude)         shift; cmd_claude "$@" ;;
     remote)         shift; cmd_remote "$@" ;;
     claude-local)   shift; cmd_claude_local "$@" ;;
