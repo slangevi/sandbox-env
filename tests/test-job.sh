@@ -88,6 +88,39 @@ check_output "stdout passes through" "job-ok" job t -- echo job-ok
 check_status "exit code passes through" 7 job t -- bash -c 'exit 7'
 check_status "exit 0 on success" 0 job t -- true
 
+echo "-- already running --"
+(cd "$PROJ" && "$SANDBOX" job slow -- sleep 60) >/dev/null 2>&1 &
+for _ in $(seq 1 30); do
+    [ "$(docker container inspect --format '{{.State.Running}}' sandbox-job-test-slow 2>/dev/null)" = "true" ] && break
+    sleep 1
+done
+check_output "a running job is refused" "already running" job slow -- true
+check_status "...with exit 75" 75 job slow -- true
+
+echo "-- stop leaves jobs alone --"
+(cd "$PROJ" && "$SANDBOX" stop) >/dev/null 2>&1 || true
+if [ "$(docker container inspect --format '{{.State.Running}}' sandbox-job-test-slow 2>/dev/null)" = "true" ]; then
+    echo "  PASS: sandbox stop did not stop the job"; PASS=$((PASS + 1))
+else
+    echo "  FAIL: sandbox stop stopped the job container"; FAIL=$((FAIL + 1))
+fi
+docker rm -f sandbox-job-test-slow >/dev/null 2>&1 || true
+wait || true
+
+echo "-- strict firewall applies to jobs --"
+PROJ_STRICT="$TMP/proj-strict"
+mkdir -p "$PROJ_STRICT"
+cat > "$PROJ_STRICT/sandbox.yaml" <<'EOF'
+name: job-strict
+firewall: strict
+EOF
+docker image tag sandbox-base:latest sandbox-job-strict:latest >/dev/null 2>&1
+sjob() { (cd "$PROJ_STRICT" && "$SANDBOX" job "$@"); }
+check_status "strict job cannot reach a non-allowed host" 7 \
+    sjob t -- bash -c 'curl --connect-timeout 5 -sf https://example.com >/dev/null && exit 0 || exit 7'
+check_status "strict job reaches an allowlisted host" 0 \
+    sjob t -- bash -c 'curl --connect-timeout 10 -sf https://api.github.com >/dev/null'
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

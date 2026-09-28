@@ -15,6 +15,7 @@ cli/sandbox build-base
 # Run all tests (each is independent, run from repo root)
 tests/test-base.sh           # Base image tools verification
 tests/test-cli.sh             # CLI happy-path commands
+tests/test-job.sh             # sandbox job: validation, naming, exit codes, already-running, strict firewall
 tests/test-cli-errors.sh      # Error handling and input validation
 tests/test-run-modes.sh       # Run modes, exec, readonly mounts
 tests/test-volumes.sh          # Volume lifecycle, persistence, cleanup
@@ -50,10 +51,10 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 **`cli/sandbox`** — The entire CLI is one bash script. Key internal structure:
 
 - **Shared helpers** (used by multiple commands):
-  - `_build_docker_args "$name" [container]` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`, `cmd_llm`, `cmd_ollama`.
+  - `_build_docker_args "$name" [container]` — Builds the global `DOCKER_ARGS` array with volumes, mounts, env vars, git config, firewall, allowed_domains, resource limits. Used by `cmd_run`, `cmd_job`, `cmd_start`, `cmd_claude`, `cmd_remote`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`, `cmd_llm`, `cmd_ollama`.
   - `_read_claude_config` — Sets global `CLAUDE_EXTRA_ARGS` array and `SKIP_PERMISSIONS_FLAG` string from `sandbox.yaml`. Used by every command that passes args to `claude`: `cmd_run`, `cmd_remote`, `cmd_claude`, `cmd_claude_local`, `cmd_remote_local`, `cmd_claude_spark`, `cmd_remote_spark`. Not `cmd_ollama`/`cmd_llm`/`cmd_start`/`cmd_comfy`, which call `_build_docker_args` but never invoke the `claude` binary.
   - `config_get` / `config_get_default` — YAML reading via Mike Farah's yq v4 (NOT jq-syntax yq).
-  - `_load_spark_env` / `_apply_spark_backend` / `_spark_preflight` / `_spark_host_url` / `_spark_run` — sparkyard gateway backend, used by `cmd_spark_status`, `cmd_claude_spark`, `cmd_remote_spark`, and the `--spark` paths of `cmd_run` and `cmd_llm`. `_load_spark_env` reads (never `source`s) `${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env` for `SPARKYARD_URL` / `LITELLM_MASTER_KEY` / `SPARKYARD_MODEL`; a real env var of the same name always wins over the file. `_spark_host_url` rewrites `host.docker.internal` to `localhost` because that alias only resolves inside the container, not on the host doing the preflight check. `_spark_preflight` checks gateway reachability and that a given model is actually served before anything launches. `SANDBOX_DRY_RUN=1` makes `_spark_run` print the `docker` argv it would execute (master key masked) instead of running it — this is how `tests/test-spark.sh` asserts argument wiring without Docker; the preflight check still runs first, dry-run or not.
+  - `_load_spark_env` / `_apply_spark_backend` / `_spark_preflight` / `_spark_host_url` / `_spark_run` — sparkyard gateway backend, used by `cmd_spark_status`, `cmd_claude_spark`, `cmd_remote_spark`, and the `--spark` paths of `cmd_run` and `cmd_llm`. `_load_spark_env` reads (never `source`s) `${XDG_CONFIG_HOME:-$HOME/.config}/sandbox/sparkyard.env` for `SPARKYARD_URL` / `LITELLM_MASTER_KEY` / `SPARKYARD_MODEL`; a real env var of the same name always wins over the file. `_spark_host_url` rewrites `host.docker.internal` to `localhost` because that alias only resolves inside the container, not on the host doing the preflight check. `_spark_preflight` checks gateway reachability and that a given model is actually served before anything launches. `SANDBOX_DRY_RUN=1` makes `_spark_run` print the `docker` argv it would execute (master key masked) instead of running it — this is how `tests/test-spark.sh` asserts argument wiring without Docker; the preflight check still runs first, dry-run or not. `cmd_job --spark` calls `_apply_spark_backend inherit`, which exports the key and passes `-e ANTHROPIC_AUTH_TOKEN` by name so the admin key never appears in docker's argv.
   - `_load_comfy_env` / `_comfy_discover` / `_comfy_preflight` / `_comfy_run` —
     ComfyUI backend, used by `cmd_comfy_status`, `cmd_comfy`, and the
     `features: [comfyui]` branch of `_build_docker_args`. `_comfy_discover`
@@ -68,7 +69,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
     (a route to an unauthenticated API whose ComfyUI-Manager endpoints
     execute code). All three arms report separately and share one override,
     `SPARKYARD_ALLOW_UNSAFE_FIREWALL=1`. Called from `cmd_claude_spark`,
-    `cmd_remote_spark`, and the `--spark` paths of `cmd_run` and `cmd_llm` —
+    `cmd_remote_spark`, and the `--spark` paths of `cmd_run`, `cmd_job` and `cmd_llm` —
     every entry point that actually ships the key into a container.
 
 - **Input validation**: `validate_name`, `validate_feature`, `validate_package`, `validate_model` — regex checks called before any value is used in Docker/filesystem operations.
@@ -103,7 +104,9 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
   passes `sandbox-<name>-headless` so a headless run (e.g. one started by the
   Matrix bridge) can coexist with the interactive container and be stopped
   without touching it. Volumes are always the project's. `cmd_stop` stops both
-  names.
+  names. `cmd_job <suffix>` uses `sandbox-<name>-<suffix>` (`headless` refused)
+  and refuses with exit 75 when that container is already running; `cmd_stop`
+  does not touch job containers.
 - **Config tamper protection**: `_build_docker_args` overlays the resolved
   `sandbox.yaml`/`.yml` with a read-only file bind over every container path
   that exposes it (default `/workspace` mount and each ancestor-matching
@@ -142,7 +145,7 @@ Tests require Docker running. Each test builds/runs/cleans its own containers. `
 - yq on this system is Mike Farah's yq v4. Syntax differs from jq-based yq. Use `yq -r '.key'` not `yq -r '.key // empty'`.
 - The dispatch `case` statement does `shift` before calling commands that accept
   args (`claude`, `claude-local`, `claude-spark`, `remote`, `remote-local`,
-  `remote-spark`, `ollama`, `llm`, `run`, `build`, `spark-status`, `comfy`,
+  `remote-spark`, `ollama`, `llm`, `run`, `job`, `build`, `spark-status`, `comfy`,
   `comfy-status`). Two exceptions: `exec` and `models` receive full `"$@"` and handle the shift internally.
 
 ## When Adding a Feature Script
