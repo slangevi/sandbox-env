@@ -479,6 +479,42 @@ check_output "video --fps is guarded" "--fps needs a value" "$COMFY" video --pro
 check_output "txt2img rejects --duration on a workflow without it" "unknown parameter 'duration'" \
     "$COMFY" txt2img --prompt p --duration 3 --out "$TMP/vf3"
 
+echo "-- --workflow picks a non-default workflow --"
+"$COMFY" video --prompt p --out "$TMP/wa0" >/dev/null 2>&1
+check_output "video without --workflow still uses the default" "^video/video-fixture$" \
+    jq -r '.prompt["9"].inputs.filename_prefix' "$TMP/last-prompt.json"
+"$COMFY" video --workflow video-alt --prompt "waves" --duration 3 --out "$TMP/wa1" >/dev/null 2>&1
+check_output "video --workflow runs the named workflow" "^video/video-alt$" \
+    jq -r '.prompt["9"].inputs.filename_prefix' "$TMP/last-prompt.json"
+check_output "...with the other flags still mapped onto its params" "^3$" \
+    jq -r '.prompt["13"].inputs.value' "$TMP/last-prompt.json"
+check_output "--workflow is order-independent" "^video/video-alt$" \
+    sh -c '"$1" video --prompt p --workflow video-alt --out "$2" >/dev/null 2>&1; jq -r ".prompt[\"9\"].inputs.filename_prefix" "$3"' _ "$COMFY" "$TMP/wa2" "$TMP/last-prompt.json"
+rm -f "$TMP/last-prompt.json"
+check_output "a workflow without the wrapper's tag is refused" "not tagged 'video'" \
+    "$COMFY" video --workflow minimal-txt2img --prompt p --out "$TMP/wa3"
+check_status "...exiting 1" 1 "$COMFY" video --workflow minimal-txt2img --prompt p --out "$TMP/wa3"
+check_output "...and the refusal lists the video workflows" "video-alt" \
+    "$COMFY" video --workflow minimal-txt2img --prompt p --out "$TMP/wa3"
+check_status "...and submits nothing" 1 test -e "$TMP/last-prompt.json"
+check_output "an unknown --workflow lists the choices" "video-fixture" \
+    "$COMFY" video --workflow nosuch --prompt p --out "$TMP/wa4"
+check_status "...exiting 1" 1 "$COMFY" video --workflow nosuch --prompt p --out "$TMP/wa4"
+# comfy video is on the approval gate's allowlist and comfy run is not, so
+# --workflow must never reach a file outside the shared library: a workflow
+# the agent wrote itself (with a manifest claiming the tag) would otherwise
+# run ungated.
+mkdir -p "$TMP/rogue" && cp "$COMFY_WORKFLOWS"/video-alt.json "$COMFY_WORKFLOWS"/video-alt.params.json "$TMP/rogue/"
+check_output "--workflow refuses a path" "library name" \
+    "$COMFY" video --workflow "$TMP/rogue/video-alt.json" --prompt p --out "$TMP/wa5"
+check_status "...exiting 1" 1 "$COMFY" video --workflow "$TMP/rogue/video-alt" --prompt p --out "$TMP/wa5"
+check_status "...including a relative escape" 1 \
+    "$COMFY" video --workflow ../video-alt --prompt p --out "$TMP/wa5"
+check_status "...and nothing was submitted" 1 test -e "$TMP/last-prompt.json"
+check_output "--workflow is guarded" "--workflow needs a value" "$COMFY" video --prompt p --workflow
+check_output "txt2img accepts --workflow too" "^a pear$" \
+    sh -c '"$1" txt2img --workflow minimal-txt2img --prompt "a pear" --out "$2" >/dev/null 2>&1; jq -r ".prompt[\"6\"].inputs.text" "$3"' _ "$COMFY" "$TMP/wa6" "$TMP/last-prompt.json"
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

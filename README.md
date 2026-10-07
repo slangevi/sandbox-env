@@ -637,6 +637,8 @@ comfy txt2img --prompt TEXT       generate an image
     [--negative T] [--checkpoint NAME] [--seed N] [--steps N]
     [--width N] [--height N] [--out DIR] [--json]
 comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video")
+    [--workflow NAME]             txt2img/video/edit: use this library workflow
+                                  instead of the default (it must carry the tag)
     [--duration S] [--fps N] [--frames N]   whichever the workflow exposes
 comfy edit --image FILE --prompt TEXT       edit an image (workflow tagged "edit")
                                   FILE: a local file (uploaded for you) or a
@@ -701,7 +703,12 @@ workflow from the shared directory or a path in the workspace. A workflow with
 a sibling `<name>.params.json` manifest gets friendly parameter names
 (`--set prompt="..."`); without one, raw node paths still work
 (`--set 3.inputs.seed=42`). `comfy txt2img`, `comfy video` and `comfy edit`
-pick the workflow tagged `txt2img`, `video` or `edit`. `comfy edit --image`
+pick the workflow tagged `txt2img`, `video` or `edit` — the one also tagged
+`default` — unless `--workflow NAME` names another. `NAME` must be a workflow
+in the shared directory that carries the wrapper's tag; a path is refused.
+That matters for gated projects: the wrappers can sit on an approval allowlist
+while `comfy run` stays gated, and `--workflow` never widens them to a
+workflow the agent wrote into its own workspace. `comfy edit --image`
 accepts a local file — it is uploaded to ComfyUI's input directory first and
 the stored name is what the graph sees — or a name already uploaded.
 
