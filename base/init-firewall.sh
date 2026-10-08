@@ -96,13 +96,19 @@ IP_LITERAL='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
 DNS_REFRESH=false
 DNSMASQ_CONF=/run/sandbox-dnsmasq.conf
 DNSMASQ_PID=/run/sandbox-dnsmasq.pid
-NAMES=$(collect_domains | sort -u | grep -v -E "$IP_LITERAL" | grep -v '^$' || true)
+# A name admits every name under it (dnsmasq's ipset= matches subdomains), so a
+# single-label entry such as `org` would open a whole TLD: it is skipped (the
+# CLI refuses it too).
+NAMES=$(collect_domains | sort -u | grep -v -E "$IP_LITERAL" | grep -F . || true)
 stop_dnsmasq() {
     [ -f "$DNSMASQ_PID" ] && kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
     rm -f "$DNSMASQ_PID"
     DNS_REFRESH=false
 }
-if [ -n "$NAMES" ] && command -v dnsmasq >/dev/null 2>&1 && id dnsmasq >/dev/null 2>&1; then
+# dnsmasq listens on 127.0.0.1; an upstream on that same address would be
+# itself (and the loopback REJECT below would cut programs off from 127.0.0.1).
+if [ -n "$NAMES" ] && [ "$DNS_RESOLVER" != "127.0.0.1" ] \
+    && command -v dnsmasq >/dev/null 2>&1 && id dnsmasq >/dev/null 2>&1; then
     {
         echo "listen-address=127.0.0.1"
         echo "bind-interfaces"
@@ -121,41 +127,60 @@ if [ -n "$NAMES" ] && command -v dnsmasq >/dev/null 2>&1 && id dnsmasq >/dev/nul
     fi
 fi
 
-while read -r domain; do
-    [ -z "$domain" ] && continue
-    # IPv4 literals and CIDRs (a LAN host such as a NAS, which has no public
-    # DNS name and whose mDNS .local name does not resolve in here) go into
-    # the set directly — there is nothing for dig to resolve.
-    if [[ "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
-        echo "Allowing IP literal $domain"
-        ipset -exist add allowed-domains "$domain" 2>/dev/null \
-            || echo "WARNING: Could not add $domain to the allowed set"
-        continue
-    fi
-    echo "Resolving $domain..."
-    if $DNS_REFRESH; then
-        # Through dnsmasq: it fills the set itself. Checking that it did is
-        # what proves the refresh works, not merely that dnsmasq runs.
-        ips=$(dig @127.0.0.1 +time=3 +tries=2 +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}')
-        while read -r ip; do
-            [ -z "$ip" ] && continue
-            if ! ipset test allowed-domains "$ip" 2>/dev/null; then
-                echo "WARNING: dnsmasq did not add $ip ($domain) to the allowed set"
-                stop_dnsmasq
-                ipset add allowed-domains "$ip" 2>/dev/null || true
-            fi
-        done <<< "$ips"
-    fi
-    if ! $DNS_REFRESH; then
-        ips=$(dig +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}')
-        while read -r ip; do
-            [ -n "$ip" ] && ipset add allowed-domains "$ip" 2>/dev/null || true
-        done <<< "$ips"
-    fi
-    if [ -z "$ips" ]; then
-        echo "WARNING: Could not resolve $domain"
-    fi
-done < <(collect_domains | sort -u)
+VERIFIED=0
+resolve_allowed() {
+    while read -r domain; do
+        [ -z "$domain" ] && continue
+        # IPv4 literals and CIDRs (a LAN host such as a NAS, which has no public
+        # DNS name and whose mDNS .local name does not resolve in here) go into
+        # the set directly — there is nothing for dig to resolve.
+        if [[ "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+            echo "Allowing IP literal $domain"
+            ipset -exist add allowed-domains "$domain" 2>/dev/null \
+                || echo "WARNING: Could not add $domain to the allowed set"
+            continue
+        fi
+        if [[ "$domain" != *.* ]]; then
+            echo "WARNING: allowed entry '$domain' is not a dotted name; skipped (it would admit every name under it)"
+            continue
+        fi
+        echo "Resolving $domain..."
+        if $DNS_REFRESH; then
+            # Through dnsmasq: it fills the set itself. Checking that it did is
+            # what proves the refresh works, not merely that dnsmasq runs.
+            # A name that does not answer (timeout, refused) is a warning, not
+            # an abort: dig exits non-zero and pipefail would end init here.
+            ips=$(dig @127.0.0.1 +time=3 +tries=2 +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}') || ips=""
+            while read -r ip; do
+                [ -z "$ip" ] && continue
+                if ipset test allowed-domains "$ip" 2>/dev/null; then
+                    VERIFIED=$((VERIFIED + 1))
+                else
+                    echo "WARNING: dnsmasq did not add $ip ($domain) to the allowed set"
+                    stop_dnsmasq
+                    ipset add allowed-domains "$ip" 2>/dev/null || true
+                fi
+            done <<< "$ips"
+        fi
+        if ! $DNS_REFRESH; then
+            ips=$(dig +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}') || ips=""
+            while read -r ip; do
+                [ -n "$ip" ] && ipset add allowed-domains "$ip" 2>/dev/null || true
+            done <<< "$ips"
+        fi
+        if [ -z "$ips" ]; then
+            echo "WARNING: Could not resolve $domain"
+        fi
+    done < <(collect_domains | sort -u)
+}
+resolve_allowed
+if $DNS_REFRESH && [ "$VERIFIED" -eq 0 ]; then
+    # dnsmasq runs but answered nothing it could prove was added: not the
+    # resolver. Resolve once, directly.
+    echo "WARNING: dnsmasq answered no allowed name"
+    stop_dnsmasq
+    resolve_allowed
+fi
 if [ -n "$NAMES" ] && ! $DNS_REFRESH; then
     echo "WARNING: DNS-refresh unavailable; allowed domains resolved once"
     [ -s /tmp/sandbox-dnsmasq.err ] && sed 's/^/  dnsmasq: /' /tmp/sandbox-dnsmasq.err

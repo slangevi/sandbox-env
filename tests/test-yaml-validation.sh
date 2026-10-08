@@ -122,6 +122,18 @@ check "bad CIDR config builds (validation is at run time)" bash -c "cd $TEST_TMP
 check_output "malformed CIDR rejected" "Invalid domain" bash -c "cd $TEST_TMPDIR && $SANDBOX run -- true"
 docker rmi sandbox-badcidr-test:latest 2>/dev/null || true
 
+# Test: a single-label name (a TLD such as `org`) is refused: the strict
+# firewall admits every name under an entry, so it would open a whole TLD.
+cat > "$TEST_TMPDIR/sandbox.yaml" <<'EOF'
+name: tld-test
+firewall: strict
+allowed_domains:
+  - org
+EOF
+check "single-label config builds (validation is at run time)" bash -c "cd $TEST_TMPDIR && $SANDBOX build"
+check_output "single-label domain rejected" "Invalid domain" bash -c "cd $TEST_TMPDIR && $SANDBOX run -- true"
+docker rmi sandbox-tld-test:latest 2>/dev/null || true
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

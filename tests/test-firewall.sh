@@ -148,6 +148,78 @@ else
     fail "the fallback without dnsmasq is not strict: $FB_OUT"
 fi
 
+# dnsmasq that runs but cannot answer, or answers without filling the set,
+# must not stay the resolver. A wrapper earlier in root's PATH rewrites the
+# config init writes, then runs the real dnsmasq.
+echo "-- DNS refresh falls back when dnsmasq does not do its job --"
+WRAP_DIR=$(mktemp -d)
+NET="sandbox-fwtest-net-$$"
+trap 'rm -rf "$WRAP_DIR"; docker rm -f "$DNS_C" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true' EXIT
+make_wrapper() {   # make_wrapper <name> <sed expression applied to init's config>
+    {
+        echo '#!/bin/sh'
+        echo 'conf=${1#--conf-file=}'
+        echo "sed -e '$2' -e '/^ipset=/d' \"\$conf\" > /tmp/wrapped-dnsmasq.conf"
+        echo 'exec /usr/sbin/dnsmasq --conf-file=/tmp/wrapped-dnsmasq.conf'
+    } > "$WRAP_DIR/$1"
+    chmod 755 "$WRAP_DIR/$1"
+}
+make_wrapper no-answers 's/^server=.*/server=127.0.0.1#5353/'
+make_wrapper no-ipset 's/^#//'
+for case in no-answers no-ipset; do
+    OUT=$(docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW -e SANDBOX_FIREWALL=strict \
+        -v "$WRAP_DIR/$case:/usr/local/sbin/dnsmasq:ro" "$IMAGE" \
+        bash -c 'head -1 /etc/resolv.conf; curl --connect-timeout 5 -sf https://example.com >/dev/null 2>&1 && echo REACHED' 2>&1) || true
+    if echo "$OUT" | grep -q "DNS-refresh unavailable" && ! echo "$OUT" | grep -q "nameserver 127.0.0.1" \
+        && ! echo "$OUT" | grep -q REACHED; then
+        pass "dnsmasq with $case: falls back, still strict"
+    else
+        fail "dnsmasq with $case: did not fall back strictly: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
+    fi
+done
+
+echo "-- an upstream resolver on 127.0.0.1 is not a loopback blackhole --"
+LO_RULES=$(docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW --dns 127.0.0.1 \
+    -e SANDBOX_FIREWALL=strict --entrypoint bash "$IMAGE" -c \
+    '/usr/local/bin/init-firewall.sh 2>&1 | grep -E "DNS-refresh|DNS refresh"; iptables -S OUTPUT' 2>&1) || true
+if echo "$LO_RULES" | grep -q "DNS-refresh unavailable" && ! echo "$LO_RULES" | grep -q -- "-d 127.0.0.1/32 .*REJECT"; then
+    pass "resolver 127.0.0.1: refresh off, no REJECT on 127.0.0.1"
+else
+    fail "resolver 127.0.0.1 is rejected for every program: $(echo "$LO_RULES" | grep -E 'REJECT|DNS' | tr '\n' ' ')"
+fi
+
+echo "-- a single-label entry is not admitted --"
+TLD_OUT=$(docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW -e SANDBOX_FIREWALL=strict \
+    -e SANDBOX_ALLOWED_DOMAINS=org "$IMAGE" \
+    bash -c 'curl --connect-timeout 5 -sf https://httpbin.org >/dev/null 2>&1 && echo REACHED' 2>&1) || true
+if echo "$TLD_OUT" | grep -q "not a dotted name" && ! echo "$TLD_OUT" | grep -q REACHED; then
+    pass "allowed entry 'org' is skipped with a warning; httpbin.org stays blocked"
+else
+    fail "allowed entry 'org' opened its TLD or was not reported: $(echo "$TLD_OUT" | tail -2 | tr '\n' ' ')"
+fi
+
+echo "-- user-defined network (loopback resolver 127.0.0.11) --"
+docker network create "$NET" >/dev/null
+DNS_C="sandbox-fwtest-dnsnet-$$"
+docker run -d --name "$DNS_C" --network "$NET" --cap-add NET_ADMIN --cap-add NET_RAW \
+    -e SANDBOX_FIREWALL=strict "$IMAGE" sleep 300 >/dev/null
+for _ in $(seq 1 60); do
+    docker logs "$DNS_C" 2>&1 | grep -q "Firewall active" && break
+    sleep 1
+done
+if docker exec -u node "$DNS_C" dig +short +time=3 api.anthropic.com 2>/dev/null | grep -qE '^[0-9.]+$' \
+    && ! docker exec -u node "$DNS_C" dig +short +time=2 +tries=1 @127.0.0.11 api.anthropic.com 2>/dev/null \
+        | grep -qE '^[0-9.]+$' \
+    && ! docker exec -u node "$DNS_C" dig +tcp +short +time=2 +tries=1 @127.0.0.11 api.anthropic.com 2>/dev/null \
+        | grep -qE '^[0-9.]+$' \
+    && docker exec -u node "$DNS_C" getent hosts "$DNS_C" >/dev/null; then
+    pass "127.0.0.11 is refused to programs (UDP and TCP); names and container names resolve through dnsmasq"
+else
+    fail "on a user-defined network a program can query 127.0.0.11 directly, or resolution broke"
+fi
+docker rm -f "$DNS_C" >/dev/null 2>&1
+docker network rm "$NET" >/dev/null 2>&1
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
