@@ -2,7 +2,7 @@
 # tests/test-base.sh — Verify base image tools and configuration
 set -euo pipefail
 
-IMAGE="sandbox-base:latest"
+IMAGE="${IMAGE:-sandbox-base:latest}"
 PASS=0
 FAIL=0
 
@@ -26,6 +26,7 @@ check "claude is installed"   claude --version
 check "git is installed"      git --version
 check "zsh is installed"      zsh --version
 check "jq is installed"       jq --version
+check "dnsmasq is installed"  dnsmasq --version
 check "fzf is installed"      fzf --version
 check "gh is installed"       gh --version
 check "curl is installed"     curl --version
