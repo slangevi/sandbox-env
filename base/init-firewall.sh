@@ -81,27 +81,110 @@ collect_domains() {
     fi
 }
 
-while read -r domain; do
-    [ -z "$domain" ] && continue
-    # IPv4 literals and CIDRs (a LAN host such as a NAS, which has no public
-    # DNS name and whose mDNS .local name does not resolve in here) go into
-    # the set directly — there is nothing for dig to resolve.
-    if [[ "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
-        echo "Allowing IP literal $domain"
-        ipset -exist add allowed-domains "$domain" 2>/dev/null \
-            || echo "WARNING: Could not add $domain to the allowed set"
-        continue
+# 7a. DNS refresh. A CDN-hosted allowed domain answers with rotating edge
+# addresses, so a set filled once at start goes stale within minutes. dnsmasq
+# becomes the container's only resolver and puts every address it hands out
+# for an allowed name into the set before the application sees the answer
+# (`ipset=`; it matches a name and its subdomains). Entries are only added.
+# If dnsmasq is missing, will not start, or does not fill the set, init falls
+# back to resolving once — still strict, just without the refresh.
+DNS_RESOLVER=$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)
+if [ -z "$DNS_RESOLVER" ]; then
+    DNS_RESOLVER="127.0.0.11"
+fi
+IP_LITERAL='^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'
+DNS_REFRESH=false
+DNSMASQ_CONF=/run/sandbox-dnsmasq.conf
+DNSMASQ_PID=/run/sandbox-dnsmasq.pid
+# A name admits every name under it (dnsmasq's ipset= matches subdomains), so a
+# single-label entry such as `org` would open a whole TLD: it is skipped (the
+# CLI refuses it too).
+NAMES=$(collect_domains | sort -u | grep -v -E "$IP_LITERAL" | grep -F . || true)
+stop_dnsmasq() {
+    [ -f "$DNSMASQ_PID" ] && kill "$(cat "$DNSMASQ_PID")" 2>/dev/null || true
+    rm -f "$DNSMASQ_PID"
+    DNS_REFRESH=false
+}
+# dnsmasq listens on 127.0.0.1; an upstream on that same address would be
+# itself (and the loopback REJECT below would cut programs off from 127.0.0.1).
+if [ -n "$NAMES" ] && [ "$DNS_RESOLVER" != "127.0.0.1" ] \
+    && command -v dnsmasq >/dev/null 2>&1 && id dnsmasq >/dev/null 2>&1; then
+    {
+        echo "listen-address=127.0.0.1"
+        echo "bind-interfaces"
+        echo "port=53"
+        echo "no-resolv"
+        echo "server=$DNS_RESOLVER"
+        echo "user=dnsmasq"
+        echo "pid-file=$DNSMASQ_PID"
+        echo "cache-size=1000"
+        echo "ipset=/$(echo "$NAMES" | paste -sd/)/allowed-domains"
+    } > "$DNSMASQ_CONF"
+    chmod 644 "$DNSMASQ_CONF"
+    if dnsmasq --conf-file="$DNSMASQ_CONF" 2>/tmp/sandbox-dnsmasq.err; then
+        DNS_REFRESH=true
+        echo "DNS refresh: dnsmasq on 127.0.0.1 fills the allowed set as names resolve."
     fi
-    echo "Resolving $domain..."
-    ips=$(dig +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}')
-    if [ -z "$ips" ]; then
-        echo "WARNING: Could not resolve $domain"
-        continue
-    fi
-    while read -r ip; do
-        ipset add allowed-domains "$ip" 2>/dev/null || true
-    done <<< "$ips"
-done < <(collect_domains | sort -u)
+fi
+
+VERIFIED=0
+resolve_allowed() {
+    while read -r domain; do
+        [ -z "$domain" ] && continue
+        # IPv4 literals and CIDRs (a LAN host such as a NAS, which has no public
+        # DNS name and whose mDNS .local name does not resolve in here) go into
+        # the set directly — there is nothing for dig to resolve.
+        if [[ "$domain" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+            echo "Allowing IP literal $domain"
+            ipset -exist add allowed-domains "$domain" 2>/dev/null \
+                || echo "WARNING: Could not add $domain to the allowed set"
+            continue
+        fi
+        if [[ "$domain" != *.* ]]; then
+            echo "WARNING: allowed entry '$domain' is not a dotted name; skipped (it would admit every name under it)"
+            continue
+        fi
+        echo "Resolving $domain..."
+        if $DNS_REFRESH; then
+            # Through dnsmasq: it fills the set itself. Checking that it did is
+            # what proves the refresh works, not merely that dnsmasq runs.
+            # A name that does not answer (timeout, refused) is a warning, not
+            # an abort: dig exits non-zero and pipefail would end init here.
+            ips=$(dig @127.0.0.1 +time=3 +tries=2 +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}') || ips=""
+            while read -r ip; do
+                [ -z "$ip" ] && continue
+                if ipset test allowed-domains "$ip" 2>/dev/null; then
+                    VERIFIED=$((VERIFIED + 1))
+                else
+                    echo "WARNING: dnsmasq did not add $ip ($domain) to the allowed set"
+                    stop_dnsmasq
+                    ipset add allowed-domains "$ip" 2>/dev/null || true
+                fi
+            done <<< "$ips"
+        fi
+        if ! $DNS_REFRESH; then
+            ips=$(dig +noall +answer A "$domain" 2>/dev/null | awk '$4 == "A" {print $5}') || ips=""
+            while read -r ip; do
+                [ -n "$ip" ] && ipset add allowed-domains "$ip" 2>/dev/null || true
+            done <<< "$ips"
+        fi
+        if [ -z "$ips" ]; then
+            echo "WARNING: Could not resolve $domain"
+        fi
+    done < <(collect_domains | sort -u)
+}
+resolve_allowed
+if $DNS_REFRESH && [ "$VERIFIED" -eq 0 ]; then
+    # dnsmasq runs but answered nothing it could prove was added: not the
+    # resolver. Resolve once, directly.
+    echo "WARNING: dnsmasq answered no allowed name"
+    stop_dnsmasq
+    resolve_allowed
+fi
+if [ -n "$NAMES" ] && ! $DNS_REFRESH; then
+    echo "WARNING: DNS-refresh unavailable; allowed domains resolved once"
+    [ -s /tmp/sandbox-dnsmasq.err ] && sed 's/^/  dnsmasq: /' /tmp/sandbox-dnsmasq.err
+fi
 
 # 8. Allow the Docker host: at the default route's gateway, and at the address
 # `host.docker.internal` resolves to when the CLI added that alias (the spark
@@ -125,16 +208,31 @@ if [ -n "$ALIAS_IP" ] && [ "$ALIAS_IP" != "$HOST_IP" ]; then
 fi
 
 # 8b. Replace broad DNS rule with restricted resolver-only rule
-# Detect the actual DNS resolver (127.0.0.11 on Linux Docker, varies on Docker Desktop)
-DNS_RESOLVER=$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)
-if [ -z "$DNS_RESOLVER" ]; then
-    DNS_RESOLVER="127.0.0.11"
-fi
-echo "Restricting DNS to resolver: $DNS_RESOLVER"
+# (DNS_RESOLVER was detected in 7a: 127.0.0.11 on a user-defined Docker
+# network, the host's resolver on the default bridge, varies on Docker Desktop.)
 iptables -D OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -D INPUT -p udp --sport 53 -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
-iptables -A INPUT -p udp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
+if $DNS_REFRESH; then
+    # Only dnsmasq may ask the upstream resolver; everything else asks dnsmasq
+    # on 127.0.0.1, so no process can resolve an address that skips the set.
+    echo "Restricting DNS to dnsmasq -> $DNS_RESOLVER"
+    iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner dnsmasq -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 53 -d "$DNS_RESOLVER" -m owner --uid-owner dnsmasq -j ACCEPT
+    iptables -A INPUT -p udp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
+    if [[ "$DNS_RESOLVER" == 127.* ]]; then
+        # Docker's embedded resolver is on loopback (DNAT to a random port), so
+        # the loopback ACCEPT above would let anyone reach it: refuse it to all
+        # but dnsmasq, ahead of that rule.
+        iptables -I OUTPUT 1 -d "$DNS_RESOLVER" -m owner ! --uid-owner dnsmasq -j REJECT
+    fi
+    { echo "nameserver 127.0.0.1"; grep -E '^(search|options)' /etc/resolv.conf || true; } > /tmp/resolv.conf.new
+    cat /tmp/resolv.conf.new > /etc/resolv.conf
+    rm -f /tmp/resolv.conf.new
+else
+    echo "Restricting DNS to resolver: $DNS_RESOLVER"
+    iptables -A OUTPUT -p udp --dport 53 -d "$DNS_RESOLVER" -j ACCEPT
+    iptables -A INPUT -p udp --sport 53 -s "$DNS_RESOLVER" -j ACCEPT
+fi
 
 # 8c. SSH restricted to allowed domains only (applied after ipset is populated)
 iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
