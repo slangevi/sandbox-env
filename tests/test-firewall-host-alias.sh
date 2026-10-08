@@ -12,7 +12,7 @@
 # Both addresses are this host. Needs Docker with NET_ADMIN and host python3.
 set -euo pipefail
 
-IMAGE="sandbox-base:latest"
+IMAGE="${IMAGE:-sandbox-base:latest}"
 PASS=0
 FAIL=0
 

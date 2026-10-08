@@ -539,10 +539,17 @@ allowed_domains:
   - 192.168.10.0/24  # or a CIDR
 ```
 
-Entries are resolved with DNS at container start, so a host with no public
-name — a NAS on your LAN, say — can be given as an IPv4 literal or CIDR
-instead; those are added to the allow set directly. mDNS `.local` names
-don't resolve inside the container, so use the address.
+Names stay current for the container's whole life: `dnsmasq` is the
+container's resolver (`127.0.0.1`), and every address it hands out for an
+allowed name is added to the allow set before the program sees the answer — so
+an API behind a CDN, whose edge addresses rotate every few seconds, keeps
+working in a long session or job. An allowed name also admits its subdomains
+(`api.example.com` admits `x.api.example.com`, never `example.com` or
+`www.example.com`). The set only grows. A host with no public name — a NAS on
+your LAN, say — can be given as an IPv4 literal or CIDR instead; those are added
+to the allow set directly. mDNS `.local` names don't resolve inside the
+container, so use the address. If dnsmasq cannot start, the container logs
+`DNS-refresh unavailable` and resolves each name once at start, still strict.
 
 **`open`** — No network restrictions. Use when you need unrestricted access (e.g., installing packages from arbitrary sources). Set `firewall: open` in your sandbox.yaml.
 
@@ -550,7 +557,9 @@ don't resolve inside the container, so use the address.
 
 In strict mode, the firewall:
 - Blocks all IPv6 traffic
-- Restricts DNS to the Docker resolver only (prevents DNS tunneling)
+- Restricts DNS: programs ask the local `dnsmasq` on `127.0.0.1`, and only
+  dnsmasq may ask the Docker resolver (prevents DNS tunneling and lookups that
+  bypass the allow set)
 - Restricts SSH to whitelisted destinations only
 - Narrows host network access to the gateway IP only
 - Verifies both blocking and allowing work at startup
