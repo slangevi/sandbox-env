@@ -657,6 +657,8 @@ comfy video --prompt TEXT [...]   generate video (needs a workflow tagged "video
 comfy edit --image FILE --prompt TEXT       edit an image (workflow tagged "edit")
                                   FILE: a local file (uploaded for you) or a
                                   name already in ComfyUI's input directory
+comfy frame VIDEO [--index N]     save one frame of a video as a PNG (default:
+    [--out DIR] [--json]          the last frame, e.g. to start the next clip)
 comfy run WF [--set k=v]...       run any workflow; k is a manifest parameter
     [--out DIR] [--timeout S] [--json]     or a raw path like 3.inputs.seed
     [--no-wait]                   submit only; print the prompt id and return
@@ -725,6 +727,21 @@ while `comfy run` stays gated, and `--workflow` never widens them to a
 workflow the agent wrote into its own workspace. `comfy edit --image`
 accepts a local file — it is uploaded to ComfyUI's input directory first and
 the stored name is what the graph sees — or a name already uploaded.
+
+**Trigger words.** A manifest may carry a `triggers` block mapping parameter
+values to words another parameter must contain, typically a LoRA file to the
+trigger words that make it take effect:
+`"triggers": {"into": "prompt", "from": ["lora1", "lora2"], "words": {"<file>": "<words>"}}`.
+After all `--set` values and defaults are applied, the helper prepends the
+words for each `from` value to `into` (slot order, skipping words already
+present, case-insensitively) and reports what it added on stderr. `triggers` may also be a list of such
+blocks, one per prompt (e.g. two chained segments, each with its own LoRA).
+
+**Frames from a video.** `comfy frame VIDEO` saves one frame as a PNG, by
+default the last one, which is what chaining a clip onto the next needs. It runs
+a four-node graph in ComfyUI itself (LoadVideo, GetVideoComponents,
+ImageFromBatch, SaveImage), so the sandbox needs no video tooling. A local file
+is uploaded first; only the saved frame is downloaded.
 
 **Long renders.** `comfy run ... --no-wait` submits the job, prints its prompt
 id and returns immediately — nothing is polled and nothing is downloaded. Pick

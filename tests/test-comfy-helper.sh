@@ -215,6 +215,15 @@ echo "-- failure paths --"
 curl -sS -X POST "$COMFYUI_URL/_stub/pending" >/dev/null
 check_output "timeout names the fetch escape hatch" "comfy fetch" \
     "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out7" --timeout 2
+# COMFY_JOB_TIMEOUT below an agent's tool timeout turns one long render into a
+# loop of short calls; the message must hand over the exact next command, and
+# `comfy job ID --wait` comes first because `fetch` refuses a job still running.
+check_output "timeout names 'comfy job ID --wait' to keep waiting" "comfy job stub-prompt-[0-9]* --wait" \
+    "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/out7b" --timeout 2
+check_output "COMFY_JOB_TIMEOUT sets the wrappers' wait" "timed out after 2s" \
+    env COMFY_JOB_TIMEOUT=2 "$COMFY" txt2img --prompt x --out "$TMP/out7c"
+check_output "...and job --wait's" "timed out after 2s" \
+    timeout 10 env COMFY_JOB_TIMEOUT=2 "$COMFY" job stub-prompt-1 --wait
 # Interrupt mid-poll: the job id must survive into the message.
 ( "$COMFY" run minimal-txt2img --set prompt=x --out "$TMP/outint" --timeout 60 >/dev/null 2>"$TMP/int.err" &
   RUNPID=$!; sleep 3; kill -INT "$RUNPID" 2>/dev/null; wait "$RUNPID" 2>/dev/null ) || true
@@ -514,6 +523,57 @@ check_status "...and nothing was submitted" 1 test -e "$TMP/last-prompt.json"
 check_output "--workflow is guarded" "--workflow needs a value" "$COMFY" video --prompt p --workflow
 check_output "txt2img accepts --workflow too" "^a pear$" \
     sh -c '"$1" txt2img --workflow minimal-txt2img --prompt "a pear" --out "$2" >/dev/null 2>&1; jq -r ".prompt[\"6\"].inputs.text" "$3"' _ "$COMFY" "$TMP/wa6" "$TMP/last-prompt.json"
+
+echo "-- manifest triggers: LoRA trigger words reach the prompt --"
+P6() { jq -r '.prompt["6"].inputs.text' "$TMP/last-prompt.json"; }
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --out "$TMP/tr1" >/dev/null 2>&1
+check_output "a set LoRA's trigger words are prepended" "^ALPHA\. a cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --set lora2=beta.safetensors --out "$TMP/tr2" >/dev/null 2>&1
+check_output "two LoRAs: both, in slot order" "^ALPHA, beta style\. a cat$" P6
+"$COMFY" run lora-fixture --set prompt="an Alpha cat" --set lora1=alpha.safetensors --out "$TMP/tr3" >/dev/null 2>&1
+check_output "words already in the prompt (any case) are not added again" "^an Alpha cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --out "$TMP/tr4" >/dev/null 2>&1
+check_output "no LoRA set: the prompt is untouched" "^a cat$" P6
+"$COMFY" run lora-fixture --set prompt="a cat" --set lora1=gamma.safetensors --out "$TMP/tr5" >/dev/null 2>&1
+check_output "a LoRA with no trigger entry adds nothing" "^a cat$" P6
+check_output "the addition is reported, so the agent knows" "added trigger words: ALPHA" \
+    "$COMFY" run lora-fixture --set prompt="a cat" --set lora1=alpha.safetensors --out "$TMP/tr6"
+"$COMFY" run minimal-txt2img --set prompt="a cat" --out "$TMP/tr7" >/dev/null 2>&1
+check_output "a manifest without triggers is unaffected" "^a cat$" P6
+
+echo "-- manifest triggers: a list of blocks, one per prompt --"
+P7() { jq -r '.prompt["7"].inputs.text' "$TMP/last-prompt.json"; }
+"$COMFY" run two-prompt-fixture --set prompt="first" --set prompt2="second" --set lora1=alpha.safetensors --set lora2=beta.safetensors --out "$TMP/tb1" >/dev/null 2>&1
+check_output "block 1 feeds its own prompt" "^ALPHA\. first$" P6
+check_output "block 2 feeds its own prompt" "^beta style\. second$" P7
+"$COMFY" run two-prompt-fixture --set prompt="first" --set prompt2="second" --set lora1=alpha.safetensors --out "$TMP/tb2" >/dev/null 2>&1
+check_output "a block whose LoRA is unset leaves its prompt alone" "^second$" P7
+check_output "...while the other block still applies" "^ALPHA\. first$" P6
+
+echo "-- frame: grab one frame of a video --"
+printf 'not really an mp4' > "$TMP/clip.mp4"
+rm -f "$TMP/last-prompt.json"
+check_output "frame prints the saved image" "comfy-out\|\.png" \
+    "$COMFY" frame "$TMP/clip.mp4" --out "$TMP/fr1"
+check_output "a local video is uploaded first" "not really an mp4" cat "$TMP/last-upload.raw"
+check_output "...and the graph loads the name ComfyUI stored it under" "^uploaded.png$" \
+    jq -r '[.prompt[] | select(.class_type=="LoadVideo")][0].inputs.file' "$TMP/last-prompt.json"
+check_output "the default is the last frame" "^16384$" \
+    jq -r '[.prompt[] | select(.class_type=="ImageFromBatch")][0].inputs.batch_index' "$TMP/last-prompt.json"
+"$COMFY" frame "$TMP/clip.mp4" --index 5 --out "$TMP/fr2" >/dev/null 2>&1
+check_output "--index picks a frame (0-based)" "^5$" \
+    jq -r '[.prompt[] | select(.class_type=="ImageFromBatch")][0].inputs.batch_index' "$TMP/last-prompt.json"
+check_output "--index must be a non-negative integer" "must be a non-negative integer" \
+    "$COMFY" frame "$TMP/clip.mp4" --index -3 --out "$TMP/fr3"
+check_status "...exiting 1" 1 "$COMFY" frame "$TMP/clip.mp4" --index abc --out "$TMP/fr3"
+"$COMFY" frame already-there.mp4 --out "$TMP/fr4" >/dev/null 2>&1
+check_output "a name that is not a local file is used as-is" "^already-there.mp4$" \
+    jq -r '[.prompt[] | select(.class_type=="LoadVideo")][0].inputs.file' "$TMP/last-prompt.json"
+"$COMFY" frame "$TMP/clip.mp4" --out "$TMP/fr5" >/dev/null 2>&1
+check_status "the loaded video is not downloaded back" 1 test -e "$TMP/fr5/input-echo.mp4"
+check_status "...while the frame is" 0 test -e "$TMP/fr5/ComfyUI_00001_.png"
+check_output "no video gives a usage message" "usage: comfy frame" "$COMFY" frame
+check_output "--index is guarded" "--index needs a value" "$COMFY" frame "$TMP/clip.mp4" --index
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

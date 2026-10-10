@@ -90,9 +90,11 @@ class Handler(BaseHTTPRequestHandler):
                         "exception_message": "stub blew up",
                     }]],
                 }}})
+            extra = ({"1": {"images": [{"filename": "input-echo.mp4", "subfolder": "", "type": "input"}],
+                            "animated": [True]}} if STATE_FLAGS.get("loadvideo") else {})
             return self._send(200, {pid: {
                 "status": {"status_str": "success"},
-                "outputs": {"9": {"images": [
+                "outputs": {**extra, "9": {"images": [
                     {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"},
                     # A hostile filename: the helper must write a basename only.
                     {"filename": "../../escape.png", "subfolder": "", "type": "output"},
@@ -116,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             # off by one) fails loudly instead of the stub papering over it
             # by echoing back bytes regardless of params.
             expected = {
+                "input-echo.mp4": ("", "input"),
                 "ComfyUI_00001_.png": ("", "output"),
                 "../../escape.png": ("", "output"),
                 "nested_00001_.png": ("nested", "output"),
@@ -144,6 +147,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": {"message": "invalid json"}})
             if "prompt" not in body:
                 return self._send(400, {"error": {"message": "missing prompt"}})
+            # Real ComfyUI reports a LoadVideo node's input as a preview
+            # output of its own; `comfy frame` must not download it back.
+            STATE_FLAGS["loadvideo"] = any(
+                isinstance(n, dict) and n.get("class_type") == "LoadVideo"
+                for n in body["prompt"].values())
             return self._send(200, {"prompt_id": "stub-prompt-1", "number": 1})
         if u.path == "/interrupt":
             # Appended to, never overwritten: the cancel tests assert on
