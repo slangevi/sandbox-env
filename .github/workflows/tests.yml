@@ -54,6 +54,11 @@ jobs:
       - name: Test run modes
         run: tests/test-run-modes.sh
 
+      # sandbox job: validation, exit codes, the exit-75 refusal, name collisions,
+      # stop isolation, and the strict firewall inside a job (needs NET_ADMIN).
+      - name: Test sandbox job
+        run: tests/test-job.sh
+
       - name: Test volumes
         run: tests/test-volumes.sh
 
