@@ -8,7 +8,7 @@
 node=24.20-slim                   # base/Dockerfile (FROM)
 
 # Base tools (Dockerfile)
-claude-code=2.1.236               # base/Dockerfile — npm `stable` dist-tag as of 2026-09-06
+claude-code=2.1.326               # base/Dockerfile — host version as of 2026-11-18
 git-delta=0.19.2                  # base/Dockerfile
 gosu=1.19                         # base/Dockerfile
 gh=apt-managed                    # base/Dockerfile — version managed by GitHub's apt repo
