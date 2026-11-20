@@ -3,11 +3,20 @@ set -euo pipefail
 
 # This script runs as root. It initializes services, then drops to the node user.
 
-# Apply firewall if strict mode is requested
-if [ "${SANDBOX_FIREWALL:-open}" = "strict" ]; then
-    echo "Initializing strict firewall..."
-    /usr/local/bin/init-firewall.sh
-fi
+# Firewall profile: unset, empty or "open" keeps the container open; "strict"
+# and "hostonly" run init-firewall.sh; anything else (a typo) is fatal rather
+# than silently open.
+case "${SANDBOX_FIREWALL:-open}" in
+    open) ;;
+    strict|hostonly)
+        echo "Initializing ${SANDBOX_FIREWALL} firewall..."
+        /usr/local/bin/init-firewall.sh
+        ;;
+    *)
+        echo "ERROR: unknown SANDBOX_FIREWALL '${SANDBOX_FIREWALL}' (expected open, strict or hostonly)" >&2
+        exit 1
+        ;;
+esac
 
 # Start Ollama if installed and the marker file exists
 if [ -f /etc/sandbox/services/ollama ]; then

@@ -2,7 +2,45 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-echo "=== Sandbox Firewall Init (strict mode) ==="
+# SANDBOX_FIREWALL=strict (default here) or hostonly. The hostonly profile is
+# strict with no domain list at all: no names are resolved or allowed (no
+# GitHub, registries, code hosts, Anthropic or telemetry), only the Docker host
+# (reached through /etc/hosts) on SANDBOX_HOST_PORTS, dnsmasq answers NXDOMAIN
+# for every name, and port 22 is not opened. It fails closed: any problem
+# exits non-zero rather than leaving a weaker firewall.
+HOSTONLY=false
+[ "${SANDBOX_FIREWALL:-strict}" = "hostonly" ] && HOSTONLY=true
+
+if $HOSTONLY; then
+    echo "=== Sandbox Firewall Init (hostonly profile) ==="
+else
+    echo "=== Sandbox Firewall Init (strict mode) ==="
+fi
+
+if $HOSTONLY; then
+    # Caller-supplied allow lists would bypass the "no names" rule.
+    if [ -n "${SANDBOX_ALLOWED_DOMAINS:-}" ] || [ -n "${SANDBOX_COMFYUI_IP:-}" ]; then
+        echo "ERROR: hostonly profile accepts no SANDBOX_ALLOWED_DOMAINS or SANDBOX_COMFYUI_IP"
+        exit 1
+    fi
+    HOST_PORTS="${SANDBOX_HOST_PORTS:-18080,18081}"
+    IFS=, read -r -a _ports <<< "$HOST_PORTS"
+    if [ "${#_ports[@]}" -lt 1 ] || [ "${#_ports[@]}" -gt 15 ]; then
+        echo "ERROR: SANDBOX_HOST_PORTS must list 1 to 15 ports, got '$HOST_PORTS'"
+        exit 1
+    fi
+    for _p in "${_ports[@]}"; do
+        if ! [[ "$_p" =~ ^[0-9]{1,5}$ ]] || [ "$((10#$_p))" -lt 1 ] || [ "$((10#$_p))" -gt 65535 ]; then
+            echo "ERROR: SANDBOX_HOST_PORTS entry '$_p' is not a port from 1 to 65535 (list: '$HOST_PORTS')"
+            exit 1
+        fi
+    done
+    # IPv6 is only blocked by ip6tables; without it the profile cannot hold.
+    if ! command -v ip6tables >/dev/null 2>&1; then
+        echo "ERROR: ip6tables is missing; the hostonly profile cannot block IPv6"
+        exit 1
+    fi
+fi
 
 # 1. Preserve Docker DNS rules
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
@@ -38,6 +76,7 @@ iptables -A OUTPUT -o lo -j ACCEPT
 ipset create allowed-domains hash:net
 
 # 6. GitHub IPs via /meta API
+if ! $HOSTONLY; then
 echo "Fetching GitHub IP ranges..."
 # `|| gh_ranges=""` is load-bearing under `set -e`: curl -sf exits non-zero on
 # any transient GitHub failure (5xx, rate limit, DNS hiccup), which would abort
@@ -55,9 +94,12 @@ if [ -n "$gh_ranges" ] && echo "$gh_ranges" | jq -e '.web and .api and .git' >/d
 else
     echo "WARNING: Could not fetch GitHub IPs. GitHub access may not work."
 fi
+fi
 
 # 7. Resolve domains from base config + feature configs + project domains
 collect_domains() {
+    # hostonly: no domain list is read at all.
+    $HOSTONLY && return 0
     # Base domains
     if [ -f /etc/sandbox/firewall-domains.conf ]; then
         grep -v '^#' /etc/sandbox/firewall-domains.conf | grep -v '^$'
@@ -107,7 +149,31 @@ stop_dnsmasq() {
 }
 # dnsmasq listens on 127.0.0.1; an upstream on that same address would be
 # itself (and the loopback REJECT below would cut programs off from 127.0.0.1).
-if [ -n "$NAMES" ] && [ "$DNS_RESOLVER" != "127.0.0.1" ] \
+if $HOSTONLY; then
+    # hostonly: dnsmasq always runs, with no upstream and address=/#/, so every
+    # name (not in /etc/hosts) answers NXDOMAIN. Failure to start is fatal.
+    if ! command -v dnsmasq >/dev/null 2>&1 || ! id dnsmasq >/dev/null 2>&1; then
+        echo "ERROR: hostonly profile needs dnsmasq and its user"
+        exit 1
+    fi
+    {
+        echo "listen-address=127.0.0.1"
+        echo "bind-interfaces"
+        echo "port=53"
+        echo "no-resolv"
+        echo "address=/#/"
+        echo "user=dnsmasq"
+        echo "pid-file=$DNSMASQ_PID"
+    } > "$DNSMASQ_CONF"
+    chmod 644 "$DNSMASQ_CONF"
+    if ! dnsmasq --conf-file="$DNSMASQ_CONF" 2>/tmp/sandbox-dnsmasq.err; then
+        echo "ERROR: dnsmasq did not start"
+        cat /tmp/sandbox-dnsmasq.err
+        exit 1
+    fi
+    DNS_REFRESH=true
+    echo "Host-only DNS: dnsmasq on 127.0.0.1 answers NXDOMAIN for every name."
+elif [ -n "$NAMES" ] && [ "$DNS_RESOLVER" != "127.0.0.1" ] \
     && command -v dnsmasq >/dev/null 2>&1 && id dnsmasq >/dev/null 2>&1; then
     {
         echo "listen-address=127.0.0.1"
@@ -174,7 +240,7 @@ resolve_allowed() {
     done < <(collect_domains | sort -u)
 }
 resolve_allowed
-if $DNS_REFRESH && [ "$VERIFIED" -eq 0 ]; then
+if ! $HOSTONLY && $DNS_REFRESH && [ "$VERIFIED" -eq 0 ]; then
     # dnsmasq runs but answered nothing it could prove was added: not the
     # resolver. Resolve once, directly.
     echo "WARNING: dnsmasq answered no allowed name"
@@ -194,8 +260,15 @@ fi
 # bridge's gateway while the route's gateway is the joined network's. Both are
 # this host; allowing only the route's gateway rejected every model request
 # from a comfyui project with "connection refused".
+# hostonly: only SANDBOX_HOST_PORTS (default 18080,18081: a credential proxy
+# and a package registry proxy) are open on the host, not every port.
 allow_host() {   # allow_host <ipv4> <label>
     [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 0
+    if $HOSTONLY; then
+        echo "Allowing $2: $1 (tcp ports $HOST_PORTS)"
+        iptables -A OUTPUT -p tcp -d "$1" -m multiport --dports "$HOST_PORTS" -j ACCEPT
+        return 0
+    fi
     echo "Allowing $2: $1"
     iptables -A INPUT -s "$1" -j ACCEPT
     iptables -A OUTPUT -d "$1" -j ACCEPT
@@ -212,7 +285,18 @@ fi
 # network, the host's resolver on the default bridge, varies on Docker Desktop.)
 iptables -D OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -D INPUT -p udp --sport 53 -j ACCEPT
-if $DNS_REFRESH; then
+if $HOSTONLY; then
+    # DNS is dnsmasq on 127.0.0.1 only (loopback is already accepted); nothing
+    # may reach any upstream, including Docker's embedded resolver on loopback.
+    echo "Restricting DNS to dnsmasq on 127.0.0.1 (no upstream)"
+    if [[ "$DNS_RESOLVER" == 127.* && "$DNS_RESOLVER" != "127.0.0.1" ]]; then
+        iptables -I OUTPUT 1 -d "$DNS_RESOLVER" -j REJECT
+    fi
+    iptables -I OUTPUT 1 -d 127.0.0.11 -j REJECT
+    { echo "nameserver 127.0.0.1"; grep -E '^(search|options)' /etc/resolv.conf || true; } > /tmp/resolv.conf.new
+    cat /tmp/resolv.conf.new > /etc/resolv.conf
+    rm -f /tmp/resolv.conf.new
+elif $DNS_REFRESH; then
     # Only dnsmasq may ask the upstream resolver; everything else asks dnsmasq
     # on 127.0.0.1, so no process can resolve an address that skips the set.
     echo "Restricting DNS to dnsmasq -> $DNS_RESOLVER"
@@ -235,8 +319,11 @@ else
 fi
 
 # 8c. SSH restricted to allowed domains only (applied after ipset is populated)
-iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
-iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+# (hostonly: port 22 is not opened)
+if ! $HOSTONLY; then
+    iptables -A OUTPUT -p tcp --dport 22 -m set --match-set allowed-domains dst -j ACCEPT
+    iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
+fi
 
 # 9. Set default policies
 iptables -P INPUT DROP
@@ -244,7 +331,7 @@ iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
 
 # 9b. Block all IPv6 traffic (firewall only manages IPv4)
-if command -v ip6tables &>/dev/null; then
+if command -v ip6tables &>/dev/null; then   # hostonly: checked at the top
     ip6tables -P INPUT DROP
     ip6tables -P FORWARD DROP
     ip6tables -P OUTPUT DROP
@@ -267,6 +354,19 @@ if curl --connect-timeout 5 -sf https://example.com >/dev/null 2>&1; then
     exit 1
 fi
 echo "Firewall active. Blocked domains are unreachable."
+
+if $HOSTONLY; then
+    # An unlisted name must be NXDOMAIN, or the resolver is not what we set up.
+    if ! dig @127.0.0.1 +time=3 +tries=1 hostonly-nxdomain-probe.invalid 2>/dev/null | grep -q "status: NXDOMAIN"; then
+        echo "ERROR: hostonly DNS check failed: an unlisted name did not return NXDOMAIN"
+        exit 1
+    fi
+    # Reachability of the host ports (nothing may be listening yet: warn only).
+    if ! curl --connect-timeout 5 -so /dev/null http://host.docker.internal:18080 2>/dev/null; then
+        echo "WARNING: could not reach host.docker.internal:18080 (nothing listening, or the alias is missing)"
+    fi
+    exit 0
+fi
 
 # Verify an allowed domain is reachable (use -o /dev/null without -f since API returns 401 without auth)
 if ! curl --connect-timeout 10 -so /dev/null https://api.anthropic.com 2>/dev/null; then
