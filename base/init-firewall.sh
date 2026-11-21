@@ -274,7 +274,15 @@ allow_host() {   # allow_host <ipv4> <label>
     iptables -A OUTPUT -d "$1" -j ACCEPT
 }
 HOST_IP=$(ip route | grep default | awk '{print $3}')
-ALIAS_IP=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}' || true)
+if $HOSTONLY; then
+    # hostonly: the alias only from /etc/hosts (docker's --add-host). getent would fall back
+    # to DNS, which is still open at this point, and an upstream answer must never decide
+    # which address gets the host ports.
+    ALIAS_IP=$(awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { for (i = 2; i <= NF; i++)
+        if ($i == "host.docker.internal") { print $1; exit } }' /etc/hosts 2>/dev/null || true)
+else
+    ALIAS_IP=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}' || true)
+fi
 allow_host "$HOST_IP" "host gateway"
 if [ -n "$ALIAS_IP" ] && [ "$ALIAS_IP" != "$HOST_IP" ]; then
     allow_host "$ALIAS_IP" "host alias host.docker.internal"

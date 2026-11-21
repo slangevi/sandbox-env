@@ -56,7 +56,9 @@ check_blocked() {   # check_blocked <url> [docker args...]
 }
 check_reachable() {   # check_reachable <url> <label> [docker args...]
     local url="$1" label="$2"; shift 2
-    if run_hostonly "$@" -- "curl --connect-timeout 5 -sf -o /dev/null $url" >/dev/null 2>&1; then
+    # any HTTP answer counts: the port may be held by this test's listener or by a real
+    # service already running on the host (a proxy on 18080, say)
+    if run_hostonly "$@" -- "test \"\$(curl --connect-timeout 5 -s -o /dev/null -w '%{http_code}' $url)\" != 000" >/dev/null 2>&1; then
         pass "$label"
     else
         fail "$label"
@@ -103,6 +105,21 @@ check_blocked "http://host.docker.internal:14001/"
 check_reachable "http://host.docker.internal:14001/" "host port 14001 reachable with SANDBOX_HOST_PORTS=14001" \
     -e SANDBOX_HOST_PORTS=14001
 check_blocked "http://host.docker.internal:18080/" -e SANDBOX_HOST_PORTS=14001
+
+echo "-- the host alias comes from /etc/hosts only --"
+OUT=$(docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW --add-host host.docker.internal:192.0.2.10 \
+    -e SANDBOX_FIREWALL=hostonly "$IMAGE" true 2>&1) || true
+if echo "$OUT" | grep -q "Allowing host alias host.docker.internal: 192.0.2.10"; then
+    pass "alias taken from /etc/hosts"
+else
+    fail "alias in /etc/hosts not allowed"
+fi
+OUT=$(docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW -e SANDBOX_FIREWALL=hostonly "$IMAGE" true 2>&1) || true
+if echo "$OUT" | grep -q "host alias"; then
+    fail "an alias was allowed without an /etc/hosts entry"
+else
+    pass "no /etc/hosts entry: no alias allowed"
+fi
 
 echo "-- feature domain lists are ignored --"
 BDIR=$(mktemp -d)
